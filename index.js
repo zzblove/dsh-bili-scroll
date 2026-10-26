@@ -33,6 +33,7 @@ import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharte
 import { diagnoseRound } from './lib/diagnose.mjs'
 import { buildDutyPatch } from './lib/dutyprofile.mjs'
 import { MEM_TOOLS, memoryHealth, memoryTypes, searchQueryOf, searchMemory, buildMemoBlock, clipText, keyState, writeKey, testSemantic, buildVectorsNow, semanticReady } from './lib/memory.mjs'
+import { findRoundSession, readUsage, formatUsage } from './lib/usage.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { resolveUid } from './lib/uid.mjs'
 import { loadCred as dmCred, listSessions as dmList, fetchMsgs as dmFetch } from './lib/dm.mjs'
@@ -97,6 +98,8 @@ export const Config = !z ? undefined : z.object({
   memoryBaseUrl: z.string().default('').extra('volatile', true),
   memoryEmbedModel: z.string().default('').extra('volatile', true),
   memoryRerankModel: z.string().default('').extra('volatile', true),
+  /** ⭐ 2.6.0：每轮把「本轮 token 用量」私信发给主人（需要填「私信收件人 UID」） */
+  dmUsage: z.boolean().default(true).extra('volatile', true),
   /** 私信监听：只认主人本人发来的私信，有新消息就回一句 · 2.0 起默认开（查私信不花 token，只有真有人发消息才回一句） */
   dmWatch: z.boolean().default(true).extra('volatile', true),
   /** 私信监听间隔（分钟，最小 3） */
@@ -252,7 +255,7 @@ function reportMeta() {
     personaPrompt: '',
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'only', dmUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', memoryDir: '', memorySemantic: false, memoryBaseUrl: '', memoryEmbedModel: '', memoryRerankModel: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
+    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', memoryDir: '', memorySemantic: false, memoryBaseUrl: '', memoryEmbedModel: '', memoryRerankModel: '', dmUsage: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -298,6 +301,7 @@ function reportMeta() {
       p.memoryDir = raw.length > 500 ? raw.slice(0, 500) : raw
     }
     if ('memorySemantic' in p) p.memorySemantic = Boolean(p.memorySemantic)
+    if ('dmUsage' in p) p.dmUsage = Boolean(p.dmUsage)
     for (const k of ['memoryBaseUrl', 'memoryEmbedModel', 'memoryRerankModel']) {
       if (k in p) p[k] = String(p[k] || '').trim().slice(0, 300)
     }
@@ -850,6 +854,72 @@ function reportMeta() {
     if (st.day !== today) { st.day = today; st.count = 0; st.picked = 0; st.windows = {} }
     writeJson(dutyStateFile, { ...st, ...patch })
     return st
+  }
+
+  /* ⭐⭐ 2.6.0：每轮花多少 token —— 从 DSH 自己的会话投影里读（不是估算）。
+   *   值班轮每轮新开会话 ⇒ 轮结束按 mtime 找出这一轮的 session，再读
+   *   `<DSH_HOME>/storages/session_projcache/sessions/<id>.json` 的
+   *   `record.rows.tokenUsage.val.totals`。
+   *   ⚠️ 会话/投影是**异步落盘**的：先等会话目录出现，再等投影出现（各几次重试），
+   *      读不到就当"未知"，绝不影响这一轮；也别在这里抛异常（定时器回调里没人接）。 */
+  const usageFile = join(stateDir, 'usage.json')
+  const dshHomePath = () => process.env.DSH_HOME || join(process.env.USERPROFILE || process.env.HOME || '', '.dsh')
+  const sleep = (ms) => new Promise((r) => { const t = setTimeout(r, ms); t.unref?.() })
+  const dmUsageReport = async (rec, u) => {
+    try {
+      const uid = Number(cfg.dmUid) || 0
+      if (!cfg.dmUsage || !uid) return
+      const f = formatUsage(u)
+      const text = `📊 本轮 token：输入 ${(u.input / 1000).toFixed(1)}k`
+        + (u.cacheRead ? `（缓存命中 ${(u.cacheRead / 1000).toFixed(1)}k）` : '')
+        + `，输出 ${(u.output / 1000).toFixed(1)}k`
+        + `\n（这一轮：${rec.why}${Number.isFinite(rec.code) ? '，exit ' + rec.code : ''}）`
+      await call('bili_send_message', { receiver_uid: uid, text })
+      log('本轮用量已私信给你')
+    } catch (e) {
+      log('用量私信没发出去（不影响）：' + String(e?.message ?? e).slice(0, 160))
+    }
+  }
+  const collectRoundUsage = async (startedAt, why, code) => {
+    try {
+      const home = dshHomePath()
+      let sid = ''
+      for (let i = 0; i < 10 && !sid; i++) {
+        sid = findRoundSession(home, stateDir, startedAt)
+        if (!sid) await sleep(2000)
+      }
+      if (!sid) { log('本轮 token 用量：没找到这一轮的会话（老版本 DSH？）'); return null }
+      let u = null
+      for (let i = 0; i < 8 && !u; i++) {
+        u = readUsage(home, sid)
+        if (!u) await sleep(2000)
+      }
+      if (!u) { log('本轮 token 用量：会话投影还没写出来（下次再记）'); return null }
+      const rec = { at: new Date().toISOString(), day: dayKey(), why, code: Number.isFinite(code) ? code : null, ...u }
+      const prev = readJson(usageFile, { rounds: [] })
+      const rounds = [rec, ...(Array.isArray(prev.rounds) ? prev.rounds : [])].slice(0, 30)
+      writeJson(usageFile, { last: rec, rounds })
+      const f = formatUsage(u)
+      log(`本轮用量：${f.line}`)
+      await dmUsageReport(rec, u)
+      return rec
+    } catch (e) {
+      log('记 token 用量出错（不影响这一轮）：' + String(e?.message ?? e).slice(0, 160))
+      return null
+    }
+  }
+  /** 读缓存里的用量（给界面用）：最近一轮 + 今天的合计 */
+  const usageSummary = () => {
+    const j = readJson(usageFile, { rounds: [] })
+    const rounds = Array.isArray(j.rounds) ? j.rounds : []
+    const today = dayKey()
+    const todays = rounds.filter((r) => r.day === today)
+    const sum = (k) => todays.reduce((s, r) => s + (Number(r[k]) || 0), 0)
+    return {
+      last: j.last || null,
+      lastLine: formatUsage(j.last).line,
+      today: todays.length ? { rounds: todays.length, input: sum('input'), output: sum('output'), total: sum('total'), cacheRead: sum('cacheRead') } : null,
+    }
   }
 
   /* ⭐ 「定量刷」承诺的是**每天挑几条**（2026-10-16 审查修 H1：原来 st.count 从没自增过，
@@ -1720,6 +1790,8 @@ function reportMeta() {
       releaseRunLock()            // ⭐ 这一轮结束了，把锁放开（删不掉也没事，10 分钟自动过期）
       log(`刷B站结束（${why}，code=${code}）`)
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
+      // ⭐ 2.6.0：等会话落盘后把这一轮的 token 账记下来（异步、不影响收尾；读不到就"未知"）
+      Promise.resolve(collectRoundUsage(dutyStartedAt || Date.now(), why, code)).catch(() => {})
     // ⭐ 2026-10-20：这一轮跑成了、并且使用者选了收藏夹 ⇒ 把挑中的存进去（后台做，别拖住收尾）
     if (code === 0 && Number(cfg.favFolderId) > 0) {
       favToday('auto').catch((error) => log('自动收藏出错（已兜住）：' + String(error?.message ?? error)))
@@ -2603,6 +2675,8 @@ function reportMeta() {
           }
         } catch { return { ok: false, root: '', reason: '读取记忆状态失败' } }
       })(),
+      // ⭐ 2.6.0：最近一轮 / 今天累计的 token 用量（从 DSH 会话投影里读的真数）
+      usage: (() => { try { return usageSummary() } catch { return { last: null, lastLine: '', today: null } } })(),
       venvReady: venvReadyNow(),
       version: myVersion(),
       // 2026-10-22：缺哪个 Python 包装不上，得能一眼看出来（出不了二维码 =09 缺 qrcode）

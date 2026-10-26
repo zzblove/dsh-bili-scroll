@@ -1,3 +1,25 @@
+## 2.6.0 — 2026-10-26
+
+**每轮花多少 token，现在有真数了（不是估算），还能私信发给你。**
+
+- **真数从哪来**：DSH 把每个会话的用量写进投影缓存
+  `<DSH_HOME>/storages/session_projcache/sessions/<sessionId>.json` 的
+  `record.rows.tokenUsage.val.totals`。值班轮每轮新开会话 ⇒ 轮结束按 mtime 找出这一轮的 session，
+  读它的 `uncachedInputTokens / cacheReadTokens / outputTokens`。
+- **什么时候读**：子进程退出后异步去读，会话/投影是异步落盘的，所以各带几次重试；
+  读不到就记"未知"，**不影响这一轮**，也不在定时器里抛异常。
+- **界面**：设置页「本轮 token 用量」显示「上轮：输入 X（缓存命中 Y）· 输出 Z · 合计 T」+ 今天累计；
+  `/status.usage` 里也能读到（`last` / `lastLine` / `today`）。
+- **私信上报**：新增开关「把每轮 token 用量私信给我」（默认开，但**只有填了「私信收件人 UID」才发**）。
+  走的是 `bili_send_message` 的硬闸 —— 收件人只能是设置里那个人，模型/插件都改不了。
+- 历史保存在数据目录的 `usage.json`（最近 30 轮）。
+
+实测（2026-10-26 那一轮，5 条视频）：**输入 385.3k（其中缓存命中 305.3k）· 输出 24.2k · 合计 409.5k**。
+
+**升级后重启一次 dsh**。新增 `node tools/test-usage.mjs`（23 条断言）。
+
+---
+
 ## 2.5.1 — 2026-10-26
 
 **修「开了语义检索却没用上」：项目里那份记忆 CLI 是旧的，而且旧到会静默忽略参数。**

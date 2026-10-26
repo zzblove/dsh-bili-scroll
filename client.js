@@ -822,6 +822,19 @@ function WatchTab() {
                 h('div', { 'data-bd-note': '' }, memTest || '「测一下」会真跑一次检索：告诉你 key 通不通、走了语义没有、花了多久、命中几条。')),
             ]
           })(),
+          // ⭐ 2.6.0：本轮 token 用量（DSH 会话投影里的真数）+ 私信回执
+          h('div', { 'data-bd-label': '' }, '本轮 token 用量'),
+          h('div', { 'data-bd-note': '' },
+            (st.usage && st.usage.lastLine)
+              ? '上轮：' + st.usage.lastLine
+                + (st.usage.today ? ' · 今天 ' + st.usage.today.rounds + ' 轮共 ' + ((st.usage.today.total || 0) / 1000).toFixed(1) + 'k' : '')
+              : '还没有记录 —— 跑完一轮就会出现（取自 DSH 自己的会话用量，不是估算）'),
+          h(ToggleRow, {
+            label: '把每轮 token 用量私信给我',
+            note: '发到「私信收件人 UID」那个人（只能是你自己）；没填 UID 就不发，每轮最多一条。',
+            on: Boolean(cfg.dmUsage),
+            onChange: (v) => patch({ dmUsage: v }, '用量私信'),
+          }),
           h('div', { 'data-bd-label': '' }, '日报写多细'),
           h('select', {
             'data-bd-input': '', value: rl ?? 'full',
