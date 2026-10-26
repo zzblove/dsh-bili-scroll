@@ -1340,6 +1340,26 @@ def _duty_today() -> str:
     return _dt.datetime.now().strftime("%Y-%m-%d")
 
 
+_DUTY_DATE_RE = re.compile(r"^(?:(\d{4})[-/.])?(\d{1,2})[-/.](\d{1,2})(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?$")
+
+
+def _duty_norm_date(raw: str) -> str:
+    """模型给的日期 → YYYY-MM-DD；认不出来就用今天（#133：以前 `10-23` 原样写进判重表，宿主解析不了）。
+    没写年份按今年补，补出来比今天晚就算去年 —— 跟宿主 lib/state.mjs 的 seenDay 同一套规则。"""
+    today = _dt.date.today()
+    m = _DUTY_DATE_RE.match(str(raw or "").strip())
+    if not m:
+        return today.isoformat()
+    y = int(m.group(1)) if m.group(1) else today.year
+    try:
+        d = _dt.date(y, int(m.group(2)), int(m.group(3)))
+        if not m.group(1) and d > today:
+            d = d.replace(year=y - 1)
+    except ValueError:
+        return today.isoformat()
+    return d.isoformat()
+
+
 def _cell(s: str, limit: int = 60) -> str:
     """表格单元格：去换行、转义竖线、截断。"""
     t = " ".join(str(s or "").split())
@@ -1402,7 +1422,7 @@ def duty_seen_append(bvid: str, title: str, up: str, status: str, date: str = ""
         title: 标题
         up: UP 主
         status: 挑了 / 跳过 / 评论
-        date: 日期（YYYY-MM-DD，留空=今天）
+        date: 日期（YYYY-MM-DD，一般留空=今天）
 
     Returns:
         写到了哪个文件
@@ -1410,7 +1430,7 @@ def duty_seen_append(bvid: str, title: str, up: str, status: str, date: str = ""
     bv = str(bvid or "").strip()
     if not bv:
         return "没写：bvid 是空的"
-    d = (str(date or "").strip() or _duty_today())[:10]
+    d = _duty_norm_date(date)
     row = f"| {_cell(d, 10)} | {_cell(bv, 16)} | {_cell(title)} | {_cell(up, 30)} | {_cell(status, 8)} |\n"
     return "已追加到 " + _append(DUTY_HOME / "seen.md", row)
 

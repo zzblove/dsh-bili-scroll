@@ -1,6 +1,6 @@
 {
   "name": "dsh-bili-scroll",
-  "version": "2.8.0",
+  "version": "2.8.1",
   "description": "DSH 插件：每天替你刷一轮 B站 —— 读字幕挑出值得的、写一份日报，值得的就 @ 你",
   "keywords": [
     "dsh",
@@ -45,6 +45,9 @@
   "engines": {
     "dsh": ">=0.1.7-rc.1",
     "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": "*",

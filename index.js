@@ -29,7 +29,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
 import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
-import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey } from './lib/state.mjs'
+import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey, seenDay } from './lib/state.mjs'
 import { diagnoseRound } from './lib/diagnose.mjs'
 import { buildDutyPatch } from './lib/dutyprofile.mjs'
 import { MEM_TOOLS, memoryHealth, memoryTypes, searchQueryOf, searchMemory, buildMemoBlock, clipText, keyState, writeKey, testSemantic, buildVectorsNow, semanticReady } from './lib/memory.mjs'
@@ -1342,9 +1342,18 @@ function reportMeta() {
     //    commentOn 是"这一轮到底能不能发公开评论"的唯一判据（工具层的闸用的是同一套逻辑）
     const dmUidEff = Number(cfg.dmUid) || dmUidCache
     const dmDegraded = cfg.dmMode === 'only' && !(dmUidEff > 0)
-    const dmModeEff = dmDegraded ? 'off' : cfg.dmMode
-    if (dmDegraded) log('⚠️ 选的是「只私信」，但不知道发给谁（没填 UID、也没填「@ 谁」，或查不到）⇒ 这一轮降级成只发评论')
-    const commentOn = Boolean(cfg.autoComment && cfg.mentionName && dmModeEff !== 'only')
+      const dmModeEff = dmDegraded ? 'off' : cfg.dmMode
+      // ⭐ #137：能不能发评论要看 autoComment —— 评论关着时「降级成只发评论」是假的
+      const commentOn = Boolean(cfg.autoComment && cfg.mentionName && dmModeEff !== 'only')
+      if (dmDegraded) {
+        const note = commentOn
+          ? '⚠️ 只剩评论可发：没填收件人 UID / 「@ 谁」，或查不到 ⇒ 这一轮只发评论'
+          : '⛔ 这一轮什么都不会发出去：选的是「只私信」但没有收件人，评论又是关的 ⇒ 只会写报告'
+        log(note)
+        roundNotes.push(note)
+      } else if (cfg.dmMode === 'only') {
+        roundNotes.push('投递：只私信（已找到收件人）')
+      }
     const dmOn = Boolean(dmModeEff !== "off" && dmUidEff > 0)
     return `你是这个账号的 B站 助手。`
       + `下面是使用者的设定（如果有）—— **按它来**，别用你默认那套人格。`
@@ -1545,9 +1554,15 @@ function reportMeta() {
       if (dutyProfileState === 'ok') syncDutyProviders()
       return dutyProfileState === 'ok'
     } catch (e) {
-      dutyProfileState = 'failed'
-      log('⚠️ 最小权限 profile 没铺成功（' + String(e?.message ?? e) + '）⇒ 这一轮会退回 headless')
-      return false
+        dutyProfileState = 'failed'
+        const why = String(e?.message ?? e)
+        // ⭐ #136：铺不上很常见（杀软锁文件 / OneDrive 同步 / 长路径），但别只丢一句「退回 headless」
+        log('⚠️ 最小权限 profile 铺不上：' + why)
+        log('   目标目录：' + dutyProfileDir)
+        log('   常见原因：杀软或 OneDrive 正在占用、盘符长路径、目标被别的进程锁住')
+        log('   ⚠️ 这一轮只能用 headless（权限更大：能看到文件系统）—— 修好后重启 dsh 就回到最小权限')
+        roundNotes.push('⚠️ 最小权限 profile 没铺上，这一轮退回了 headless（权限更大）：' + why)
+        return false
     }
   }
   // 真正用的 profile：用户手填了别的就尊重；还是老默认 has headless ⇒ 用最小权限那个
@@ -1670,6 +1685,8 @@ function reportMeta() {
    * ⚠️ 措辞守则：看不到写「**没查到**」，**绝不写"没发出去"**（翻页/热度排序都会漏）。
    */
   let verifying = false
+    // ⭐ #137：这一轮"投递层面"的实情，收尾写进报告（免得以为发了、晚上才发现没收到）
+    const roundNotes = []
   const runVerify = async (why = 'manual') => {
     if (verifying) return { ok: false, error: '上一次复核还没跑完，等它完事' }
     verifying = true
@@ -1698,6 +1715,20 @@ function reportMeta() {
    *   写进报告顶部；认不出来就走原来的兜底文案（行为跟以前一样）。
    * ⚠️ 只在"报告本来该有却没有"时补（`reportLevel: off` 不补），不覆盖已有报告。
    */
+    const writeRoundNotesToReport = () => {
+      try {
+        if (!roundNotes.length) return
+        if (String(cfg.reportLevel || 'full') === 'off') return
+        const f = join(outDir, `${dayKey()}.md`)
+        const block = '## 投递\n\n' + roundNotes.map((n) => '- ' + n).join('\n') + '\n'
+        if (!existsSync(f)) { writeFileSync(f, `# 刷B站 · ${dayKey()}\n\n` + block, 'utf8'); return }
+        let cur = readFileSync(f, 'utf8')
+        const at = cur.indexOf('## 投递')
+        if (at >= 0) cur = cur.slice(0, at).replace(/\s*$/, '') + '\n'
+        writeFileSync(f, cur.replace(/\s*$/, '') + '\n' + block, 'utf8')
+      } catch { /* 宁可没这段，也不能让这一轮挂掉 */ }
+    }
+
   const stubReportIfMissing = (code) => {
     try {
       if (String(cfg.reportLevel || 'full') === 'off') return
@@ -1853,6 +1884,8 @@ function reportMeta() {
       releaseRunLock()            // ⭐ 这一轮结束了，把锁放开（删不掉也没事，10 分钟自动过期）
       log(`刷B站结束（${why}，code=${code}）`)
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
+      // ⭐ 2.2.2（上游 #137）：这一轮「投递层面」的实情写进报告 —— 免得以为发了、晚上才发现没收到
+      try { writeRoundNotesToReport() } catch { /* 写不进去也不能炸 */ }
       // ⭐ 2.6.0：等会话落盘后把这一轮的 token 账记下来（异步、不影响收尾；读不到就"未知"）
       // ⭐ 2.7.0：记完用量顺手把日报推到飞书（用量数据也一起带进卡片）
       Promise.resolve(collectRoundUsage(dutyStartedAt || Date.now(), why, code))
@@ -2544,9 +2577,9 @@ function reportMeta() {
           const cells = t.split('|').map((x) => x.trim()).slice(1, -1)
           const bvIdx = cells.findIndex((x) => /^BV[0-9A-Za-z]{10}$/.test(x))
           const dayRaw = bvIdx > 0 ? cells[bvIdx - 1] : cells[0]
-          const dm = /^(\d{4}-\d{2}-\d{2})/.exec(dayRaw || '')
-          if (bvIdx >= 0 && dm && dm[1] < cutKey) {
-            const month = dm[1].slice(0, 7)
+          const day = seenDay(dayRaw)
+          if (bvIdx >= 0 && day && day < cutKey) {
+            const month = day.slice(0, 7)
             if (!moved.has(month)) moved.set(month, [])
             moved.get(month).push(line)
             continue
@@ -2569,12 +2602,14 @@ function reportMeta() {
       return n
     } catch (e) { log('判重表归档失败（不影响使用）：' + String(e?.message ?? e)); return 0 }
   }
+  let seenBadDays = 0   // 上次解析时认不出日期的行数 ⇒ 变了才记日志（这个函数每次打开设置页都会调）
   const parseSeenTable = () => {
     const file = join(stateDir, 'seen.md')
     let text = ''
     try { text = readFileSync(file, 'utf8') } catch { return [] }
     const out = []
     const seen = new Set()
+    let bad = 0
     // 评论记录表里的 rpid（形如 `| BVxxxx | 317831597441 | ...`）⇒ 这些视频**确实发出去过**
     const deliveredBvs = new Set()
     for (const raw of text.split(/\r?\n/)) {
@@ -2592,10 +2627,9 @@ function reportMeta() {
       if (bvIdx < 0) continue
       const bvid = c[bvIdx]
       const dayRaw = bvIdx > 0 ? c[bvIdx - 1] : c[0]
-      // ⭐ 日期允许带时间：`2026-10-22` / `2026-10-22 18:51` / `2026-10-22T18:51`
-      const dm = /^(\d{4}-\d{2}-\d{2})(?:[ T]\d{2}:\d{2}(?::\d{2})?)?$/.exec(dayRaw)
-      if (!dm) continue
-      const day = dm[1]
+      // ⭐ 日期允许带时间、允许没写年份：`2026-10-22` / `2026-10-22 18:51` / `10-22`（#133）
+      const day = seenDay(dayRaw)
+      if (!day) { if (bvIdx > 0) bad++; continue }   // BV 在第一列的是「评论记录」表，本来就没有日期列
       const title = c[bvIdx + 1] || ''
       const up = c[bvIdx + 2] || ''
       const status = c[c.length - 1] || ''
@@ -2607,6 +2641,11 @@ function reportMeta() {
       const commented = /评论/.test(status)
       const delivered = /评论|私信|已发|发给/.test(status) || deliveredBvs.has(bvid)
       out.push({ day, bvid, title, up, status, picked, commented, delivered, url: 'https://www.bilibili.com/video/' + bvid })
+    }
+    // ⭐ 以前这里是静默丢行 ⇒ 卡片墙空了也没人知道为什么（#133）
+    if (bad !== seenBadDays) {
+      seenBadDays = bad
+      if (bad) log('判重表有 ' + bad + ' 行日期格式认不出来，「它刷过的视频」里没显示这些行（见 seen.md）')
     }
     out.sort((a, b) => (a.day === b.day ? (a.picked === b.picked ? 0 : a.picked ? -1 : 1) : (a.day < b.day ? 1 : -1)))
     return out

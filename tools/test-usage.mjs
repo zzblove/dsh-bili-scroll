@@ -73,7 +73,7 @@ const mk = () => { const d = mkdtempSync(join(tmpdir(), 'usage-')); roots.push(d
   const cli = readFileSync(P + 'client.js', 'utf8')
   ok(/from '\.\/lib\/usage\.mjs'/.test(idx), 'index.js 没 import usage.mjs')
   ok(idx.includes('collectRoundUsage('), '轮结束没有收集用量')
-  ok(/child\.on\('exit'[\s\S]{0,400}collectRoundUsage/.test(idx), 'exit 回调里没调用 collectRoundUsage')
+  ok(/child\.on\('exit'[\s\S]{0,1500}collectRoundUsage/.test(idx), 'exit 回调里没调用 collectRoundUsage')
   ok(idx.includes('dmUsageReport'), '没有私信上报')
   ok(idx.includes('dmUsage: true') && idx.includes('dmUsage: z.boolean()'), '配置里没有 dmUsage')
   ok(idx.includes("if ('dmUsage' in p)"), 'persistCfg 没处理 dmUsage')
