@@ -89,8 +89,14 @@ export const Config = !z ? undefined : z.object({
   /** 跑 headless 时的工作目录 */
   /** ⭐ 人设提示词：使用者想让它怎么说话（比"填工作区"对新手友好得多）· 留空 = 按中性说话 */
   personaPrompt: z.string().default('').extra('volatile', true),
-  /** ⭐ 长期记忆：一个包含 `scripts/mem.py` + `memory/` 的项目根目录（留空 = 这一轮不带记忆） */
+  /** ⭐ 长期记忆：一个包含 `scripts/mem.py` 或 `scripts/mem.js` + `memory/` 的项目根目录（留空 = 这一轮不带记忆） */
   memoryDir: z.string().default('').extra('volatile', true),
+  /** ⭐ 语义检索：用嵌入 + 重排（要 API key：MEMORY_API_KEY 或 ~/.mem_api_key）；关着 = 纯本地关键词 */
+  memorySemantic: z.boolean().default(false).extra('volatile', true),
+  /** 语义检索的服务地址 / 模型（留空 = 用 memory-kit 的默认：SiliconFlow + bge-m3 + bge-reranker-v2-m3） */
+  memoryBaseUrl: z.string().default('').extra('volatile', true),
+  memoryEmbedModel: z.string().default('').extra('volatile', true),
+  memoryRerankModel: z.string().default('').extra('volatile', true),
   /** 私信监听：只认主人本人发来的私信，有新消息就回一句 · 2.0 起默认开（查私信不花 token，只有真有人发消息才回一句） */
   dmWatch: z.boolean().default(true).extra('volatile', true),
   /** 私信监听间隔（分钟，最小 3） */
@@ -246,7 +252,7 @@ function reportMeta() {
     personaPrompt: '',
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'only', dmUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', memoryDir: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
+    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', memoryDir: '', memorySemantic: false, memoryBaseUrl: '', memoryEmbedModel: '', memoryRerankModel: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -290,6 +296,10 @@ function reportMeta() {
     if ('memoryDir' in p) {
       const raw = String(p.memoryDir || '').trim()
       p.memoryDir = raw.length > 500 ? raw.slice(0, 500) : raw
+    }
+    if ('memorySemantic' in p) p.memorySemantic = Boolean(p.memorySemantic)
+    for (const k of ['memoryBaseUrl', 'memoryEmbedModel', 'memoryRerankModel']) {
+      if (k in p) p[k] = String(p[k] || '').trim().slice(0, 300)
     }
     if ('dmWatch' in p) p.dmWatch = Boolean(p.dmWatch)
     if ('dmWatchMinutes' in p) p.dmWatchMinutes = Math.max(1, Math.min(120, Number(p.dmWatchMinutes) || 1))
@@ -1111,7 +1121,7 @@ function reportMeta() {
       if (!q) { memoCache = { at: Date.now(), query: '', block: '', state: 'noquery' }; return { ...info, state: 'noquery' } }
       const fresh = memoCache.query === q && memoCache.block && (Date.now() - memoCache.at) < 10 * 60_000
       if (fresh) return { ...info, state: memoCache.state, cached: true }
-      const r = await searchMemory({ python: cfg.pythonPath || 'python', runner: info.runner, root: info.root, query: q, k: 5 })
+      const r = await searchMemory({ python: cfg.pythonPath || 'python', runner: info.runner, root: info.root, query: q, k: 5, semantic: Boolean(cfg.memorySemantic) })
       if (!r.ok) {
         log('记忆检索没跑成（不影响这一轮）：' + String(r.err || '').slice(0, 200))
         memoCache = { at: Date.now(), query: q, block: '', state: 'fail' }
@@ -1485,6 +1495,14 @@ function reportMeta() {
             '          BILI_MEM_RUNNER: ' + yq(String(m.runner?.kind || 'python')),
             '          BILI_MEM_PYTHON: ' + yq(posix(cfg.pythonPath || 'python')),
             '          BILI_MEM_TYPES: ' + yq((m.types || []).join(',')),
+            // ⭐ 2.4.0：语义检索（嵌入 + 重排）—— 开关与可选的服务地址/模型；key 由 CLI 自己从
+            //    MEMORY_API_KEY / ~/.mem_api_key 读，**不进 config.json、不进 overlay**
+            ...(cfg.memorySemantic
+              ? ['          BILI_MEM_SEMANTIC: ' + yq('1')]
+              : []),
+            ...(cfg.memoryBaseUrl ? ['          MEMORY_BASE_URL: ' + yq(posix(cfg.memoryBaseUrl))] : []),
+            ...(cfg.memoryEmbedModel ? ['          MEMORY_EMBED_MODEL: ' + yq(cfg.memoryEmbedModel)] : []),
+            ...(cfg.memoryRerankModel ? ['          MEMORY_RERANK_MODEL: ' + yq(cfg.memoryRerankModel)] : []),
             // Node 版记忆（memory-kit）：桌面版里没有独立 node，用 Electron 本体 + 这个变量
             ...(m.runner?.kind === 'node'
               ? [
@@ -2561,7 +2579,7 @@ function reportMeta() {
       memory: (() => {
         try {
           const m = memoryInfo()
-          return { ...m, state: memoCache.state, query: memoCache.query, chars: memoCache.block.length }
+          return { ...m, state: memoCache.state, query: memoCache.query, chars: memoCache.block.length, semantic: Boolean(cfg.memorySemantic) }
         } catch { return { ok: false, root: '', reason: '读取记忆状态失败' } }
       })(),
       venvReady: venvReadyNow(),

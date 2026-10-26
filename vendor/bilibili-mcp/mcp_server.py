@@ -1405,8 +1405,19 @@ MEM_ROOT = os.environ.get("BILI_MEM_ROOT", "").strip()
 MEM_PYTHON = os.environ.get("BILI_MEM_PYTHON", "").strip() or sys.executable
 MEM_RUNNER = os.environ.get("BILI_MEM_RUNNER", "").strip() or "python"
 MEM_NODE = os.environ.get("BILI_MEM_NODE", "").strip()
+# ⭐ 语义检索（嵌入 + 重排）：宿主开了这个开关才走；key 由 CLI 自己从
+#    MEMORY_API_KEY / ~/.mem_api_key 读（不经过这里，也就不会落到日志/配置里）
+MEM_SEMANTIC = os.environ.get("BILI_MEM_SEMANTIC", "").strip() in ("1", "true", "on")
 MEM_TYPES = tuple(t.strip() for t in os.environ.get("BILI_MEM_TYPES", "").split(",") if t.strip()) \
     or ("fact", "decision", "howto", "correction")
+
+
+def _mem_search_args(q: str, n: int) -> list:
+    """两种执行器的检索参数不同：Node 版用 --semantic；Python 版用 --mode auto（弱命中才走 API）。"""
+    if MEM_RUNNER == "node":
+        return ["search", q, "-k", str(n)] + (["--semantic"] if MEM_SEMANTIC else [])
+    return ["search", q, "--mode", "auto" if MEM_SEMANTIC else "local",
+            "-k", str(n), "--max-chars", "4000"]
 
 
 def _mem_root():
@@ -1457,7 +1468,7 @@ def _mem_run(args: list, timeout: int = 25) -> dict:
 @tool()
 def bili_mem_search(query: str, k: int = 5) -> str:
     """
-    在用户的**长期记忆**里检索（本地关键词检索，不联网、不花钱）。
+    在用户的**长期记忆**里检索（默认本地关键词、不联网；宿主开了语义检索时会用嵌入 + 重排）。
 
     Args:
         query: 检索词（用关键词，别写整句话）
@@ -1470,7 +1481,7 @@ def bili_mem_search(query: str, k: int = 5) -> str:
     if not q:
         return json.dumps({"ok": False, "error": "检索词是空的"}, ensure_ascii=False)
     n = max(1, min(int(k or 5), 10))
-    r = _mem_run(["search", q, "--mode", "local", "-k", str(n), "--max-chars", "4000"])
+    r = _mem_run(_mem_search_args(q, n), timeout=45 if MEM_SEMANTIC else 25)
     if not r.get("ok") and r.get("error"):
         return json.dumps({"ok": False, "error": r["error"]}, ensure_ascii=False)
     out = (r.get("out") or "").strip()

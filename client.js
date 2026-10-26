@@ -717,6 +717,17 @@ function WatchTab() {
             + (st.memory.state === 'empty' ? ' · 上次检索没有命中（不算错）' : '')
             + (st.memory.state === 'noquery' ? ' · 没填关键词，所以这一轮没检索' : '')
             + (st.memory.state === 'fail' ? ' · 上次检索失败，看 duty.log' : '')) : null,
+          // ⭐ 语义检索（嵌入 + 重排）：默认关，纯本地关键词不花钱
+          h(ToggleRow, {
+            label: '用嵌入 + 重排做语义检索',
+            note: '默认关：纯本地关键词、不联网、不花钱。开了会用 BAAI/bge-m3 建向量 + bge-reranker-v2-m3 重排，'
+              + '按量计费，需要 API key（放 MEMORY_API_KEY 环境变量或 ~/.mem_api_key 文件，不写进配置）；'
+              + '失败会自动退回关键词，不会把这一轮弄挂。',
+            on: Boolean(cfg.memorySemantic),
+            onChange: (v) => patch({ memorySemantic: v }, '语义检索'),
+          }),
+          h('div', { 'data-bd-note': '' },
+            st.memory && st.memory.semantic ? '语义检索：已开启（这一轮会走嵌入 + 重排）' : '语义检索：关着（只用本地关键词）'),
           h('div', { 'data-bd-label': '' }, '日报写多细'),
           h('select', {
             'data-bd-input': '', value: rl ?? 'full',

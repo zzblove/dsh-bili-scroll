@@ -228,6 +228,31 @@ function fakeMemoryProject({ withMemPy = true, withMemory = true, indexLines = 2
   ok(py.includes('BILI_MEM_TYPES'), 'MCP 没读类型名单')
 }
 
+// ⑪ 语义检索（嵌入 + 重排）：参数按执行器分开拼，默认仍必须是本地
+{
+  const idx = readFileSync(P + 'index.js', 'utf8')
+  const cli = readFileSync(P + 'client.js', 'utf8')
+  const py = readFileSync(P + 'vendor/bilibili-mcp/mcp_server.py', 'utf8')
+
+  const nodeSem = searchArgs('q', { semantic: true, runnerKind: 'node' })
+  ok(nodeSem.includes('--semantic'), 'Node 版语义检索没加 --semantic：' + JSON.stringify(nodeSem))
+  const nodeLocal = searchArgs('q', { semantic: false, runnerKind: 'node' })
+  ok(!nodeLocal.includes('--semantic'), 'Node 版默认不该带 --semantic：' + JSON.stringify(nodeLocal))
+  const pySem = searchArgs('q', { semantic: true })
+  ok(pySem.includes('auto') && !pySem.includes('local'), 'Python 版语义检索应走 --mode auto：' + JSON.stringify(pySem))
+  const pyLocal = searchArgs('q', { semantic: false })
+  ok(pyLocal.includes('local'), 'Python 版默认应走 --mode local（不花钱）：' + JSON.stringify(pyLocal))
+
+  ok(idx.includes('memorySemantic: z.boolean()'), 'Config 里没有 memorySemantic')
+  ok(idx.includes("if ('memorySemantic' in p)"), 'persistCfg 没处理 memorySemantic')
+  ok(idx.includes('semantic: Boolean(cfg.memorySemantic)'), '预取没把 semantic 传给检索')
+  ok(idx.includes('BILI_MEM_SEMANTIC'), 'overlay 没下发语义开关')
+  ok(cli.includes('用嵌入 + 重排做语义检索'), '设置页没有语义检索开关')
+  ok(py.includes('BILI_MEM_SEMANTIC') && py.includes('def _mem_search_args'), 'MCP 没按语义开关拼检索参数')
+  // key 只能由 CLI 自己从文件/环境读，宿主不该把它写进 overlay 的 env（那一行会进 duty.log/overlay 文件）
+  ok(!/'\s+MEMORY_API_KEY:\s*'/.test(idx), 'API key 被写进了 overlay env（应由 CLI 自己读 ~/.mem_api_key）')
+}
+
 for (const d of tmpRoots) { try { rmSync(d, { recursive: true, force: true }) } catch { /* 清不掉也无所谓 */ } }
 
 if (fail.length) {
