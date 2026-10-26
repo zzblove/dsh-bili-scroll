@@ -241,6 +241,13 @@ function WatchTab() {
       const [favId, setFavId] = React.useState(null)             // 选中的收藏夹 fid（字符串）
       const [persona, setPersona] = React.useState(null)   // 人设提示词草稿
       const [memDir, setMemDir] = React.useState(null)     // 长期记忆目录（markdown-project-memory 的根）
+      // ⭐ 2.5.0：语义检索的 key / 服务商 / 自检（key 只在输入框里，不回显）
+      const [memKey, setMemKey] = React.useState('')
+      const [memBusy, setMemBusy] = React.useState('')
+      const [memTest, setMemTest] = React.useState('')
+      const [memBase, setMemBase] = React.useState(null)
+      const [memEmbed, setMemEmbed] = React.useState(null)
+      const [memRerank, setMemRerank] = React.useState(null)
       const [rl, setRl] = React.useState(null)
       const [newVer, setNewVer] = React.useState('')       // 发现的新版本号（空 = 没发现）          // 日报形态：full / brief / off
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
@@ -280,6 +287,9 @@ function WatchTab() {
         if (cfg && kws === null) setKws((cfg.keywords || []).join('\n'))
         if (cfg && persona === null) setPersona(cfg.personaPrompt || '')
         if (cfg && memDir === null) setMemDir(cfg.memoryDir || '')
+        if (cfg && memBase === null) setMemBase(cfg.memoryBaseUrl || '')
+        if (cfg && memEmbed === null) setMemEmbed(cfg.memoryEmbedModel || '')
+        if (cfg && memRerank === null) setMemRerank(cfg.memoryRerankModel || '')
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
@@ -512,6 +522,46 @@ function WatchTab() {
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
 
+      // ⭐ 2.5.0：语义检索的 key / 自检 / 建向量
+      const postMemKey = async (value) => {
+        setMemBusy('memkey')
+        try {
+          const r = await jpost('/memory/key', { key: value })
+          if (r?.ok) {
+            setMemKey('')
+            setMemTest(r.set ? '✓ key 已保存到本机（不会回显）' : '已清空 key')
+            say(r.set ? 'key 已保存' : 'key 已清空', 'good')
+            setSt((old) => (old ? { ...old, memory: { ...(old.memory || {}), key: { set: Boolean(r.set), source: r.set ? 'project' : '' } } } : old))
+          } else {
+            setMemTest('保存失败：' + (r?.error || '未知原因'))
+            say('key 保存失败', 'warn')
+          }
+        } catch (e) { setMemTest('保存失败：' + String(e?.message ?? e)) } finally { setMemBusy('') }
+      }
+      const saveMemKey = () => postMemKey(String(memKey || '').trim())
+      const clearMemKey = () => postMemKey('')
+
+      const testMem = async () => {
+        setMemBusy('memtest')
+        setMemTest('正在跑一次检索…')
+        try {
+          const r = await jpost('/memory/test', {})
+          if (r?.ok) {
+            setMemTest(`✓ 通 · ${r.ms}ms · 命中 ${r.hits} 条`
+              + (r.semanticUsed ? '（走了语义检索）' : '（这次没走语义：可能是没 key、或本地关键词已命中）'))
+          } else setMemTest('✗ 失败：' + (r?.error || r?.err || '未知原因'))
+        } catch (e) { setMemTest('✗ 失败：' + String(e?.message ?? e)) } finally { setMemBusy('') }
+      }
+
+      const buildMemVectors = async () => {
+        setMemBusy('memvec')
+        setMemTest('正在建向量…（条目多时会慢一点）')
+        try {
+          const r = await jpost('/memory/vectors', {})
+          setMemTest(r?.ok ? `✓ 向量已建 · ${r.ms}ms` : '✗ 建向量失败：' + (r?.error || r?.err || '未知原因'))
+        } catch (e) { setMemTest('✗ 建向量失败：' + String(e?.message ?? e)) } finally { setMemBusy('') }
+      }
+
       const onSaveText = async () => {
         const list = String(kws || '').split('\n').map((s) => s.trim()).filter(Boolean)
         await patch({ keywords: list, personaPrompt: String(persona || '').trim(), memoryDir: String(memDir || '').trim() }, '关键词 / 人设 / 记忆目录')
@@ -721,13 +771,53 @@ function WatchTab() {
           h(ToggleRow, {
             label: '用嵌入 + 重排做语义检索',
             note: '默认关：纯本地关键词、不联网、不花钱。开了会用 BAAI/bge-m3 建向量 + bge-reranker-v2-m3 重排，'
-              + '按量计费，需要 API key（放 MEMORY_API_KEY 环境变量或 ~/.mem_api_key 文件，不写进配置）；'
-              + '失败会自动退回关键词，不会把这一轮弄挂。',
+              + '按量计费；失败会自动退回关键词，不会把这一轮弄挂。',
             on: Boolean(cfg.memorySemantic),
             onChange: (v) => patch({ memorySemantic: v }, '语义检索'),
           }),
           h('div', { 'data-bd-note': '' },
             st.memory && st.memory.semantic ? '语义检索：已开启（这一轮会走嵌入 + 重排）' : '语义检索：关着（只用本地关键词）'),
+          // ── 语义检索的 key 与服务商（2.5.0）──
+          (() => {
+            const keyInfo = st.memory?.key || { set: false, source: '', path: '' }
+            return [
+              h('div', { 'data-bd-label': '' }, '语义检索的 API key（只存本机，不回显）'),
+              h('div', { 'data-bd-row': '' },
+                h('input', {
+                  'data-bd-input': '', type: 'password', placeholder: keyInfo.set ? '已配置（留空 = 不改）' : '粘贴 key，例如 sk-...',
+                  value: memKey ?? '', onChange: (e) => setMemKey(e.target.value),
+                }),
+                h('button', {
+                  'data-bd-btn': '', disabled: memBusy === 'memkey' || !String(memKey || '').trim(),
+                  onClick: saveMemKey,
+                }, memBusy === 'memkey' ? '保存中…' : '保存 key'),
+                keyInfo.set ? h('button', { 'data-bd-btn': '', disabled: memBusy === 'memkey', onClick: clearMemKey }, '清空') : null),
+              h('div', { 'data-bd-note': '' },
+                keyInfo.set
+                  ? '✓ 已配置（来源：' + (keyInfo.source === 'env' ? '环境变量 MEMORY_API_KEY' : keyInfo.source === 'home' ? '全局 ~/.mem_api_key' : '项目内 scripts/.mem_api_key') + '）'
+                  : '还没配 key：嵌入 / 重排会退回关键词检索。'),
+              h('div', { 'data-bd-label': '' }, '服务商与模型（留空 = SiliconFlow + bge-m3 + bge-reranker-v2-m3）'),
+              h('input', {
+                'data-bd-input': '', placeholder: 'API 地址，如 https://api.siliconflow.cn/v1（留空 = 默认）',
+                value: memBase ?? '', onChange: (e) => setMemBase(e.target.value),
+                onBlur: () => patch({ memoryBaseUrl: String(memBase || '').trim() }, '记忆 API 地址'),
+              }),
+              h('input', {
+                'data-bd-input': '', placeholder: '嵌入模型，如 BAAI/bge-m3（留空 = 默认）',
+                value: memEmbed ?? '', onChange: (e) => setMemEmbed(e.target.value),
+                onBlur: () => patch({ memoryEmbedModel: String(memEmbed || '').trim() }, '嵌入模型'),
+              }),
+              h('input', {
+                'data-bd-input': '', placeholder: '重排模型，如 BAAI/bge-reranker-v2-m3（留空 = 默认）',
+                value: memRerank ?? '', onChange: (e) => setMemRerank(e.target.value),
+                onBlur: () => patch({ memoryRerankModel: String(memRerank || '').trim() }, '重排模型'),
+              }),
+              h('div', { 'data-bd-row': '' },
+                h('button', { 'data-bd-btn': '', disabled: memBusy === 'memtest', onClick: testMem }, memBusy === 'memtest' ? '测试中…' : '测一下语义检索'),
+                h('button', { 'data-bd-btn': '', disabled: memBusy === 'memvec', onClick: buildMemVectors }, memBusy === 'memvec' ? '建向量中…' : '现在就建向量'),
+                h('div', { 'data-bd-note': '' }, memTest || '「测一下」会真跑一次检索：告诉你 key 通不通、走了语义没有、花了多久、命中几条。')),
+            ]
+          })(),
           h('div', { 'data-bd-label': '' }, '日报写多细'),
           h('select', {
             'data-bd-input': '', value: rl ?? 'full',

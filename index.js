@@ -32,7 +32,7 @@ import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey } from './lib/state.mjs'
 import { diagnoseRound } from './lib/diagnose.mjs'
 import { buildDutyPatch } from './lib/dutyprofile.mjs'
-import { MEM_TOOLS, memoryHealth, memoryTypes, searchQueryOf, searchMemory, buildMemoBlock, clipText } from './lib/memory.mjs'
+import { MEM_TOOLS, memoryHealth, memoryTypes, searchQueryOf, searchMemory, buildMemoBlock, clipText, keyState, writeKey, testSemantic, buildVectorsNow } from './lib/memory.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { resolveUid } from './lib/uid.mjs'
 import { loadCred as dmCred, listSessions as dmList, fetchMsgs as dmFetch } from './lib/dm.mjs'
@@ -2579,7 +2579,18 @@ function reportMeta() {
       memory: (() => {
         try {
           const m = memoryInfo()
-          return { ...m, state: memoCache.state, query: memoCache.query, chars: memoCache.block.length, semantic: Boolean(cfg.memorySemantic) }
+          return {
+            ...m,
+            state: memoCache.state,
+            query: memoCache.query,
+            chars: memoCache.block.length,
+            semantic: Boolean(cfg.memorySemantic),
+            // ⭐ 2.5.0：界面上要能看出「key 配没配、走哪个服务商/模型」
+            key: keyState(m.ok ? m.root : ''),
+            baseUrl: cfg.memoryBaseUrl || '',
+            embedModel: cfg.memoryEmbedModel || '',
+            rerankModel: cfg.memoryRerankModel || '',
+          }
         } catch { return { ok: false, root: '', reason: '读取记忆状态失败' } }
       })(),
       venvReady: venvReadyNow(),
@@ -2755,6 +2766,36 @@ function reportMeta() {
     // ⭐ 「复核评论」：拿判重表里最近的记录，去 B站 核一遍到底公开可见没有
     //    （设置页那个按钮、以及每轮结束 90 秒后自动跑一次，都走这里）
     if (req.method === 'POST' && path === '/api/bili-duty/verify') return sendJson(res, 200, await runVerify('manual'))
+
+    /* ── 长期记忆：语义检索的 key / 自检 / 建向量（2.5.0）──
+     * ⚠️ key 只在宿主进程里读写，**不回显**（只回 source + 有没有）；
+     *    写进项目自己的 `scripts/.mem_api_key`（CLI 优先读它），不碰全局、不进 config。 */
+    if (req.method === 'POST' && path === '/api/bili-duty/memory/key') {
+      const info = memoryInfo()
+      if (!info.ok) return sendJson(res, 200, { ok: false, error: '先在设置里填好记忆目录' })
+      const body = await readBody(req)
+      const r = writeKey(info.root, String(body?.key ?? ''))
+      log('记忆 key：' + (r.ok ? (r.set ? '已保存到 ' + r.path : '已清空') : '保存失败：' + r.error))
+      return sendJson(res, 200, r)
+    }
+
+    // 「测一下」：真跑一次语义检索，回答"嵌入/重排通不通、花了多久、命中几条"
+    if (req.method === 'POST' && path === '/api/bili-duty/memory/test') {
+      const info = memoryInfo()
+      if (!info.ok) return sendJson(res, 200, { ok: false, error: info.reason })
+      const r = await testSemantic({ python: cfg.pythonPath || 'python', runner: info.runner, root: info.root })
+      log(`记忆自检：${r.ok ? '通' : '失败'} · ${r.ms}ms · 命中 ${r.hits} 条` + (r.ok ? '' : ' · ' + r.err))
+      return sendJson(res, 200, r)
+    }
+
+    // 「现在就建向量」：免得第一次检索冷启动（慢几十秒）
+    if (req.method === 'POST' && path === '/api/bili-duty/memory/vectors') {
+      const info = memoryInfo()
+      if (!info.ok) return sendJson(res, 200, { ok: false, error: info.reason })
+      const r = await buildVectorsNow({ python: cfg.pythonPath || 'python', runner: info.runner, root: info.root })
+      log(`记忆建向量：${r.ok ? '完成' : '失败'} · ${r.ms}ms`)
+      return sendJson(res, 200, r)
+    }
 
     // 「看今天的报告」：把报告的文本读出来给设置页显示（浏览器不能直接开本地文件 ✗）
     if (req.method === 'GET' && path === '/api/bili-duty/report') {

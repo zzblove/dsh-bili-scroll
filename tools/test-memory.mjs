@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import {
   MEM_TYPES, MEM_TOOLS, resolveMemoryRoot, memoryTypes, searchQueryOf, clipText, buildMemoBlock,
   searchArgs, showArgs, addArgs, runMem, addMemory, memoryHealth,
+  keyState, writeKey, testSemantic, buildVectorsNow,
 } from '../lib/memory.mjs'
 
 const P = join(dirname(fileURLToPath(import.meta.url)), '..') + '/'
@@ -251,6 +252,45 @@ function fakeMemoryProject({ withMemPy = true, withMemory = true, indexLines = 2
   ok(py.includes('BILI_MEM_SEMANTIC') && py.includes('def _mem_search_args'), 'MCP 没按语义开关拼检索参数')
   // key 只能由 CLI 自己从文件/环境读，宿主不该把它写进 overlay 的 env（那一行会进 duty.log/overlay 文件）
   ok(!/'\s+MEMORY_API_KEY:\s*'/.test(idx), 'API key 被写进了 overlay env（应由 CLI 自己读 ~/.mem_api_key）')
+}
+
+// ⑫ 语义检索的 key 管理 / 自检 / 建向量（2.5.0）
+{
+  const root = mk('bili-key-')
+  mkdirSync(join(root, 'memory'), { recursive: true })
+  mkdirSync(join(root, 'scripts'), { recursive: true })
+  writeFileSync(join(root, 'scripts', 'mem.js'), [
+    'process.stdout.write("[1] fake\\n[2] fake2\\n")',
+    'process.exit(0)',
+  ].join('\n'), 'utf8')
+
+  // 用一个空的 MEMORY_HOME，隔离本机真实的 ~/.mem_api_key
+  const noHome = mk('nohome-')
+  ok(!keyState(root, { MEMORY_HOME: noHome }).set, '空目录不该报告已配置 key')
+  const w = writeKey(root, 'sk-test-12345678')
+  ok(w.ok && w.set, '写 key 失败：' + JSON.stringify(w))
+  const st1 = keyState(root, { MEMORY_HOME: noHome })
+  ok(st1.set && st1.source === 'project', '项目内 key 没被识别：' + JSON.stringify(st1))
+  ok(readFileSync(join(root, 'scripts', '.mem_api_key'), 'utf8').trim() === 'sk-test-12345678', 'key 文件内容不对')
+  ok(!writeKey(root, 'bad key with spaces').ok, '非法 key 没被拒')
+  const cleared = writeKey(root, '')
+  ok(cleared.ok && !cleared.set && !keyState(root, { MEMORY_HOME: noHome }).set, '清空 key 没生效')
+  ok(keyState(root, { MEMORY_API_KEY: 'from-env' }).source === 'env', '环境变量来源没被识别')
+
+  const t = await testSemantic({ runner: { kind: 'node' }, root, timeoutMs: 8000 })
+  ok(t.ok && t.hits === 2 && Number.isFinite(t.ms), '自检没解析出命中条数：' + JSON.stringify(t).slice(0, 160))
+
+  const v = await buildVectorsNow({ runner: { kind: 'node' }, root, timeoutMs: 8000 })
+  ok(v.ok && Number.isFinite(v.ms), '建向量调用没跑通：' + JSON.stringify(v).slice(0, 160))
+
+  const idx = readFileSync(P + 'index.js', 'utf8')
+  const cli = readFileSync(P + 'client.js', 'utf8')
+  ok(idx.includes('/api/bili-duty/memory/key'), '缺写 key 的接口')
+  ok(idx.includes('/api/bili-duty/memory/test'), '缺语义自检接口')
+  ok(idx.includes('/api/bili-duty/memory/vectors'), '缺建向量接口')
+  ok(idx.includes('keyState(') && !idx.includes('key: cfg.memoryApiKey'), 'status 应给出 key 来源且不读配置里的 key')
+  ok(cli.includes('测一下语义检索') && cli.includes('现在就建向量'), '设置页缺两个按钮')
+  ok(cli.includes("type: 'password'"), 'key 输入框不是 password 类型（会明文显示）')
 }
 
 for (const d of tmpRoots) { try { rmSync(d, { recursive: true, force: true }) } catch { /* 清不掉也无所谓 */ } }
