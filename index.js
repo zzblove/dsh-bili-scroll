@@ -32,6 +32,7 @@ import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey } from './lib/state.mjs'
 import { diagnoseRound } from './lib/diagnose.mjs'
 import { buildDutyPatch } from './lib/dutyprofile.mjs'
+import { MEM_TOOLS, memoryHealth, searchQueryOf, searchMemory, buildMemoBlock, clipText } from './lib/memory.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { resolveUid } from './lib/uid.mjs'
 import { loadCred as dmCred, listSessions as dmList, fetchMsgs as dmFetch } from './lib/dm.mjs'
@@ -88,6 +89,8 @@ export const Config = !z ? undefined : z.object({
   /** 跑 headless 时的工作目录 */
   /** ⭐ 人设提示词：使用者想让它怎么说话（比"填工作区"对新手友好得多）· 留空 = 按中性说话 */
   personaPrompt: z.string().default('').extra('volatile', true),
+  /** ⭐ 长期记忆：一个包含 `scripts/mem.py` + `memory/` 的项目根目录（留空 = 这一轮不带记忆） */
+  memoryDir: z.string().default('').extra('volatile', true),
   /** 私信监听：只认主人本人发来的私信，有新消息就回一句 · 2.0 起默认开（查私信不花 token，只有真有人发消息才回一句） */
   dmWatch: z.boolean().default(true).extra('volatile', true),
   /** 私信监听间隔（分钟，最小 3） */
@@ -243,7 +246,7 @@ function reportMeta() {
     personaPrompt: '',
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'only', dmUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
+    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', memoryDir: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -282,6 +285,11 @@ function reportMeta() {
         log('⚠️ 人设提示词 ' + raw.length + ' 字符，超过保存上限 ' + LIMIT + ' ⇒ 只存前 ' + LIMIT + '（截掉 ' + (raw.length - LIMIT) + ' 字）')
         p.personaPrompt = raw.slice(0, LIMIT)
       } else p.personaPrompt = raw
+    }
+    // ⭐ 长期记忆目录：只接受"绝对路径或空"，超长截断（它是要被 spawn 的 cwd，别放奇怪的东西进去）
+    if ('memoryDir' in p) {
+      const raw = String(p.memoryDir || '').trim()
+      p.memoryDir = raw.length > 500 ? raw.slice(0, 500) : raw
     }
     if ('dmWatch' in p) p.dmWatch = Boolean(p.dmWatch)
     if ('dmWatchMinutes' in p) p.dmWatchMinutes = Math.max(1, Math.min(120, Number(p.dmWatchMinutes) || 1))
@@ -764,7 +772,7 @@ function reportMeta() {
     description: '**立刻跑一轮**（不等窗口）：起一个 headless 会话，把 duty.md 交给它去刷、写报告。'
       + '适合"我现在就想看一份"的场合。',
     parameters: {},
-    async execute() { const r = runDuty('manual'); return { ok: true, ...r } },
+    async execute() { await prefetchMemory(); const r = runDuty('manual'); return { ok: true, ...r } },
   })
 
   tool({
@@ -1085,6 +1093,41 @@ function reportMeta() {
     } catch (e) { log('查私信 UID 出错：' + String(e?.message ?? e)); return 0 }
   }
 
+  /* ⭐ 长期记忆（用户自己的 markdown-project-memory：`scripts/mem.py` + `memory/`）——
+   *   值班轮跑在最小权限 profile 上（没有文件系统、没有命令）⇒ 它自己跑不了 mem.py ✗
+   *   ⇒ **读**由宿主在起轮之前做好、内联进提示词；**写**靠 MCP 那三只看门工具（见 mcpWhitelist）。
+   *   ⚠️ 一律 `--mode local`：纯本地检索，不读 API key、不联网、不花钱 ✓
+   *   ⚠️ runDuty 是同步的 ⇒ 用「预取 + 10 分钟缓存」：开跑前 fire-and-forget 一次，
+   *      promptFor 直接读缓存；没预取到就不带记忆（宁可少带，也不阻塞这一轮）。 */
+  let memoCache = { at: 0, query: '', block: '', state: 'off' }
+  const memoQuery = () => searchQueryOf(cfg.keywords)
+  const memoryInfo = () => memoryHealth({ memoryDir: cfg.memoryDir, workspace: cfg.workspace })
+  const prefetchMemory = async () => {
+    try {
+      const info = memoryInfo()
+      if (!info.ok) { memoCache = { at: Date.now(), query: '', block: '', state: 'off' }; return info }
+      const q = memoQuery()
+      // 没填关键词 ⇒ 这一轮刷的是推荐流，没有靠谱的检索词 ⇒ 不乱搜（免得把不相干的记忆塞进来）
+      if (!q) { memoCache = { at: Date.now(), query: '', block: '', state: 'noquery' }; return { ...info, state: 'noquery' } }
+      const fresh = memoCache.query === q && memoCache.block && (Date.now() - memoCache.at) < 10 * 60_000
+      if (fresh) return { ...info, state: memoCache.state, cached: true }
+      const r = await searchMemory({ python: cfg.pythonPath || 'python', root: info.root, query: q, k: 5 })
+      if (!r.ok) {
+        log('记忆检索没跑成（不影响这一轮）：' + String(r.err || '').slice(0, 200))
+        memoCache = { at: Date.now(), query: q, block: '', state: 'fail' }
+        return { ...info, ok: false, error: r.err }
+      }
+      const block = buildMemoBlock({ query: q, output: clipText(r.out, 2000), root: info.root, from: info.from })
+      memoCache = { at: Date.now(), query: q, block, state: block ? 'ok' : 'empty' }
+      if (block) log('记忆：按「' + q + '」检索到相关条目，已内联进这一轮提示词')
+      else log('记忆：按「' + q + '」没检索到相关条目（不算错）')
+      return { ...info, state: memoCache.state }
+    } catch (e) {
+      log('记忆预取异常（已兜住）：' + String(e?.message ?? e))
+      return { ok: false, root: '', error: String(e?.message ?? e) }
+    }
+  }
+
   const promptFor = () => {
     // ⭐ 章程取哪一份：家里那份优先（ensureCharter 保证铺好；他改过的话就是他那份，升级的事由 ensureCharter 记账处理）
     const duty = charterPath(pluginDir, stateDir)
@@ -1166,6 +1209,10 @@ function reportMeta() {
     return `你是这个账号的 B站 助手。`
       + `下面是使用者的设定（如果有）—— **按它来**，别用你默认那套人格。`
       + ownerDoc
+      + memoCache.block
+      + (memoryInfo().ok && !memoCache.block
+        ? '\n⭐ 这一轮**没有预置记忆**（要么没填关注关键词、要么这次没检索到）：需要的时候自己用 `bili_mem_search(query="<关键词>")` 查一下，别再花时间反复翻。\n'
+        : '')
       + (ownerDoc
         ? ''
         : '⭐ 这一轮**没有**拿到使用者的设定（他没填「工作区」，或那个目录里没有 `AGENTS.md`）⇒ **按中性说话**：别扮演任何人、也别自己编一套设定 ✓。')
@@ -1282,6 +1329,9 @@ function reportMeta() {
     //   模型手里压根没有这只工具 ⇒ 表现成"开关也开了、这一轮也跑了，但从来没发出去过" ✗
     //   ⇒ dmMode 不是 off、且填了收件人 UID 才放进去（关着就不给，白名单别松）
   if (String(cfg.dmMode || 'off') !== 'off' || cfg.dmWatch) list.push('bili_send_message')   // 2026-10-21：UID 可能靠昵称查，别再拿 dmUid>0 当条件
+    // ⭐ 长期记忆（2.3.0）：只有这一轮真的配了记忆目录才下发这三只 ——
+    //    没配就别让模型拿着一堆"搜不到东西"的工具空转（免得它以为自己在写记忆、其实写不进去）
+    if (memoryInfo().ok) list.push(...MEM_TOOLS)
     return list
   }
 
@@ -1425,6 +1475,14 @@ function reportMeta() {
         '          - ' + yq(posix(script)),
         '        env:',
         '          BILI_MCP_TOOLS: ' + yq(mcpWhitelist().join(',')),
+        // ⭐ 长期记忆：把「记忆项目根目录」和「用哪个 python」交给 MCP 子进程
+        //   （它跑在沙箱外，`python scripts/mem.py …` 由它代劳；路径同样按 YAML 单引号规则转义）
+        ...(memoryInfo().ok
+          ? [
+            '          BILI_MEM_ROOT: ' + yq(posix(memoryInfo().root)),
+            '          BILI_MEM_PYTHON: ' + yq(posix(cfg.pythonPath || 'python')),
+          ]
+          : []),
         '',
       )
     }
@@ -1677,6 +1735,9 @@ function reportMeta() {
         const key = `${today}:${k}`
         if (st.windows?.[key]) continue
         bumpState({ windows: { ...(st.windows || {}), [key]: true }, count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastWhy: k })
+        // ⭐ 在定时器里不能 await（tick 是同步的）⇒ 记忆预取 fire-and-forget：
+        //    这一跳没赶上就用上一跳的缓存；下一轮一定是新的（缓存 10 分钟，间隔远大于它）
+        try { Promise.resolve(prefetchMemory()).catch(() => {}) } catch { /* 记忆失败不影响跑 */ }
         runDuty(`window:${k}`)
         return
       }
@@ -2482,6 +2543,13 @@ function reportMeta() {
       // ⭐ 2.0.4：界面上"它会认谁当主人"那行用这个（用小号登录、大号聊天的会看错）
       ownerInfo: ownerInfo(),
       loggedIn: hasCredential(),
+      // ⭐ 长期记忆（2.3.0）：界面上要能看出「接没接上、上次检索到没有、注入了多少字」
+      memory: (() => {
+        try {
+          const m = memoryInfo()
+          return { ...m, state: memoCache.state, query: memoCache.query, chars: memoCache.block.length }
+        } catch { return { ok: false, root: '', reason: '读取记忆状态失败' } }
+      })(),
       venvReady: venvReadyNow(),
       version: myVersion(),
       // 2026-10-22：缺哪个 Python 包装不上，得能一眼看出来（出不了二维码 =09 缺 qrcode）
@@ -2601,6 +2669,7 @@ function reportMeta() {
 
     if (req.method === 'POST' && path === '/api/bili-duty/run') {
       if (cfg.dmMode !== 'off' && !(Number(cfg.dmUid) > 0)) await warmDmUid()
+      await prefetchMemory()           // ⭐ 记忆先搜好、再开跑（runDuty 是同步的，它只读缓存）
       return sendJson(res, 200, { ok: true, ...runDuty('manual') })
     }
 

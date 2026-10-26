@@ -51,6 +51,9 @@
   · `tools/test-duty-profile.mjs` —— 值班 profile「宿主线路同步」的回归检查（#125/#130）。
     动了 `lib/dutyprofile.mjs`、`ensureDutyProfile` 或 overlay 里写 `agent-default-model` 那段就跑一次：
     `node tools/test-duty-profile.mjs`（纯函数 + 接线断言，不联网、不碰真家目录）
+  · `tools/test-memory.mjs` —— 「长期记忆」接入的回归检查（读 / 写 / 注入 / 参数注入面）。
+    动了 `lib/memory.mjs`、`bili_mem_*` 三只 MCP 工具、或提示词里拼记忆那段就跑一次：
+    `node tools/test-memory.mjs`（含一次真实 spawn，用假的 mem.py，不需要 python）
   · `tools/check-vision.py` —— 看图纯函数的回归检查（不联网）。动了 `_https` / `_cover_url` / `_snapshot_entries` / `_crop_tile` 就跑一次：
     `<家目录>/.venv/Scripts/python.exe tools/check-vision.py`（用插件自己的 venv，里面才有 Pillow）
 

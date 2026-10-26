@@ -1389,6 +1389,158 @@ def duty_digest_append(text: str) -> str:
     return "已追加到 " + _append(p, body + "\n")
 
 
+# ========== 长期记忆：接「Markdown 项目共享记忆」（scripts/mem.py + memory/）==========
+# ⭐ 2.3.0：值班轮没有文件系统 ⇒ 记忆的读和写都由这几只工具代劳。
+#   · 根目录由宿主通过 env `BILI_MEM_ROOT` 下发（用户设置里的「记忆目录」）；
+#     **不给就不启用**，工具会明确说"这一轮没配记忆目录"，不会假装写成功 ✓
+#   · 所有子命令都走 `--mode local` 检索 / `add` 走那套带写锁的去重逻辑 —— 
+#     参数一律**列表传参**（不经 shell），标题/正文里带引号、分号都不会被当成命令 ✓
+#   · 写入类型只认 fact / decision / howto / correction；长度都钳住，别让一整轮报告塞进记忆
+import subprocess as _sub
+
+MEM_ROOT = os.environ.get("BILI_MEM_ROOT", "").strip()
+MEM_PYTHON = os.environ.get("BILI_MEM_PYTHON", "").strip() or sys.executable
+MEM_TYPES = ("fact", "decision", "howto", "correction")
+
+
+def _mem_root():
+    if not MEM_ROOT:
+        return None
+    root = Path(MEM_ROOT)
+    if not (root / "scripts" / "mem.py").is_file():
+        return None
+    return root
+
+
+def _mem_run(args: list, timeout: int = 25) -> dict:
+    root = _mem_root()
+    if root is None:
+        return {"ok": False, "error": "这一轮没有配记忆目录（设置页「记忆目录」留空）⇒ 记忆工具不可用"}
+    try:
+        r = _sub.run(
+            [MEM_PYTHON, str(root / "scripts" / "mem.py"), *args],
+            cwd=str(root), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout,
+        )
+        return {
+            "ok": r.returncode == 0,
+            "code": r.returncode,
+            "out": (r.stdout or "").strip(),
+            "err": (r.stderr or "").strip()[:800],
+        }
+    except Exception as e:      # noqa: BLE001 —— 记忆失败绝不能让整轮挂掉
+        return {"ok": False, "error": str(e)}
+
+
+@tool()
+def bili_mem_search(query: str, k: int = 5) -> str:
+    """
+    在用户的**长期记忆**里检索（本地关键词检索，不联网、不花钱）。
+
+    Args:
+        query: 检索词（用关键词，别写整句话）
+        k: 要几条候选（默认 5，上限 10）
+
+    Returns:
+        候选列表（路径 / 摘要 / 片段 / 回看命令）；没有命中就是一句明确的"无相关记忆"
+    """
+    q = " ".join(str(query or "").split())[:200]
+    if not q:
+        return json.dumps({"ok": False, "error": "检索词是空的"}, ensure_ascii=False)
+    n = max(1, min(int(k or 5), 10))
+    r = _mem_run(["search", q, "--mode", "local", "-k", str(n), "--max-chars", "4000"])
+    if not r.get("ok") and r.get("error"):
+        return json.dumps({"ok": False, "error": r["error"]}, ensure_ascii=False)
+    out = (r.get("out") or "").strip()
+    if not out:
+        out = "无相关记忆"
+    return out[:6000]
+
+
+@tool()
+def bili_mem_show(path: str, grep: str = "", lines: str = "") -> str:
+    """
+    回看某一条记忆的**原文**（引用数字 / 路径 / 结论之前必须先看原文）。
+
+    Args:
+        path: 记忆文件路径（必须是 memory/ 开头的相对路径，如 memory/facts/xxx.md）
+        grep: 只显示命中的段落（可选）
+        lines: 行号区间，如 "11-18"（可选；给了 grep 就忽略它）
+
+    Returns:
+        原文（截断到 8000 字符）
+    """
+    p = str(path or "").strip().replace("\\", "/")
+    if not p.startswith("memory/") or ".." in p.split("/"):
+        return json.dumps({"ok": False, "error": "只允许回看 memory/ 下的条目（形如 memory/facts/xxx.md）"}, ensure_ascii=False)
+    args = ["show", p]
+    if str(grep or "").strip():
+        args += ["--grep", str(grep).strip()[:80], "-C", "2"]
+    elif str(lines or "").strip():
+        args += ["--lines", str(lines).strip()[:20]]
+    args += ["--max-chars", "8000"]
+    r = _mem_run(args)
+    if r.get("error") and not r.get("out"):
+        return json.dumps({"ok": False, "error": r["error"]}, ensure_ascii=False)
+    return (r.get("out") or "").strip()[:8000]
+
+
+@tool()
+def bili_mem_add(type: str, title: str, summary: str, body: str, scope: str = "", source: str = "") -> str:
+    """
+    把一条**值得跨天保留**的观察写进长期记忆（走 mem.py add：带写锁 + 去重 + 索引更新）。
+
+    Args:
+        type: fact（环境事实）/ decision（技术决策）/ howto（有效步骤）/ correction（更正旧条目）
+        title: 主题（一个主题一个文件，别把三件事塞一条）
+        summary: 一句话摘要（≤200 字）
+        body: 正文（≤4000 字）：背景、结论、依据；**不要写密钥、临时调试信息、代码里直接可见的内容**
+        scope: 适用范围（可选，如 memory-tooling / bilibili）
+        source: 依据（可选，如看到的视频 BV 号 / 日志路径）
+
+    Returns:
+        写到了哪个文件 / 是否命中已有条目（去重）
+    """
+    t = str(type or "").strip().lower()
+    if t not in MEM_TYPES:
+        return json.dumps({"ok": False, "error": "type 只能是 " + " / ".join(MEM_TYPES)}, ensure_ascii=False)
+    ti = " ".join(str(title or "").split())[:80]
+    sm = " ".join(str(summary or "").split())[:200]
+    bd = str(body or "").replace("\r\n", "\n").strip()[:4000]
+    if not ti or not bd:
+        return json.dumps({"ok": False, "error": "title 和 body 都不能为空"}, ensure_ascii=False)
+    root = _mem_root()
+    if root is None:
+        return json.dumps({"ok": False, "error": "这一轮没有配记忆目录 ⇒ 写不进去（别在报告里写「已记住」）"}, ensure_ascii=False)
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False, dir=str(root)) as f:
+            f.write(bd + "\n")
+            tmp = f.name
+        args = ["add", "--type", t, "--title", ti, "--summary", sm, "--body-file", tmp]
+        if str(scope or "").strip():
+            args += ["--scope", str(scope).strip()[:60]]
+        if str(source or "").strip():
+            args += ["--source", str(source).strip()[:200]]
+        r = _mem_run(args, timeout=30)
+        if not r.get("ok"):
+            return json.dumps({"ok": False, "error": r.get("err") or r.get("error") or "add 失败", "code": r.get("code")}, ensure_ascii=False)
+        # 写完 reindex（--local：不联网、复用已有向量）；失败不影响已经落盘的那条
+        re_idx = _mem_run(["reindex", "--local"], timeout=60)
+        return json.dumps({
+            "ok": True,
+            "added": r.get("out") or "",
+            "reindex_ok": bool(re_idx.get("ok")),
+            "reindex_hint": (re_idx.get("err") or "")[:200],
+        }, ensure_ascii=False)
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
 # ========== 转写：非阻塞 + 单条排队 + 可取回的结果 ==========
 #
 # ⭐⭐ 2026-10-25 修（群友报的真 bug，附了 MCP SDK 源码依据）：

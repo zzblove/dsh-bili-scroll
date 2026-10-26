@@ -240,6 +240,7 @@ function WatchTab() {
       const [favFolders, setFavFolders] = React.useState(null)   // 收藏夹列表（下拉用，null = 还没读）
       const [favId, setFavId] = React.useState(null)             // 选中的收藏夹 fid（字符串）
       const [persona, setPersona] = React.useState(null)   // 人设提示词草稿
+      const [memDir, setMemDir] = React.useState(null)     // 长期记忆目录（markdown-project-memory 的根）
       const [rl, setRl] = React.useState(null)
       const [newVer, setNewVer] = React.useState('')       // 发现的新版本号（空 = 没发现）          // 日报形态：full / brief / off
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
@@ -278,6 +279,7 @@ function WatchTab() {
       React.useEffect(() => {
         if (cfg && kws === null) setKws((cfg.keywords || []).join('\n'))
         if (cfg && persona === null) setPersona(cfg.personaPrompt || '')
+        if (cfg && memDir === null) setMemDir(cfg.memoryDir || '')
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
@@ -512,7 +514,7 @@ function WatchTab() {
 
       const onSaveText = async () => {
         const list = String(kws || '').split('\n').map((s) => s.trim()).filter(Boolean)
-        await patch({ keywords: list, personaPrompt: String(persona || '').trim() }, '关键词 / 人设 / 工作区')
+        await patch({ keywords: list, personaPrompt: String(persona || '').trim(), memoryDir: String(memDir || '').trim() }, '关键词 / 人设 / 记忆目录')
       }
 
       if (!cfg) {
@@ -696,6 +698,25 @@ function WatchTab() {
             (st.personaFromWs && String(persona || '').trim() === '')
               ? '你现在还是用「工作区」里那份 AGENTS.md 说话的（照旧生效）。想把它搬到这儿改，就把上面的路径填成本机那个目录。'
               : '改完点下面「保存」；下一轮就按这个说话。'),
+          h('div', { 'data-bd-label': '' }, '长期记忆目录 —— 接你自己的 markdown-project-memory（留空 = 不用记忆）'),
+          h('input', {
+            'data-bd-input': '',
+            placeholder: '如 D:\\zzb\\my-memory（这个目录里要有 scripts/mem.py 和 memory/）',
+            value: memDir ?? '',
+            onChange: (e) => setMemDir(e.target.value),
+            onBlur: () => patch({ memoryDir: String(memDir || '').trim() }, '长期记忆目录'),
+          }),
+          h('div', { 'data-bd-note': '' },
+            '填了以后：每轮开跑前，宿主会用这一轮的关键词**在本地**检索一份记忆喂给它（不联网、不花钱）；'
+            + '它也能用 bili_mem_add 把值得跨天留的观察写回去（最多 2 条/轮）。留空 = 完全不带记忆。'),
+          st.memory ? h('div', { 'data-bd-note': '' },
+            (st.memory.ok
+              ? '✓ 已接上：' + st.memory.root + '（索引 ' + (st.memory.files ?? 0) + ' 条）'
+              : '✗ 没接上：' + (st.memory.reason || '目录不对'))
+            + (st.memory.state === 'ok' ? ' · 上次按「' + (st.memory.query || '') + '」检索到并注入了 ' + (st.memory.chars || 0) + ' 字' : '')
+            + (st.memory.state === 'empty' ? ' · 上次检索没有命中（不算错）' : '')
+            + (st.memory.state === 'noquery' ? ' · 没填关键词，所以这一轮没检索' : '')
+            + (st.memory.state === 'fail' ? ' · 上次检索失败，看 duty.log' : '')) : null,
           h('div', { 'data-bd-label': '' }, '日报写多细'),
           h('select', {
             'data-bd-input': '', value: rl ?? 'full',

@@ -1,0 +1,184 @@
+// 长期记忆接入（markdown-project-memory）回归测试
+//   node tools/test-memory.mjs
+// 不联网、不碰真家目录；spawn 那部分用一个假的 mem.py（JS 写，免依赖 python）。
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import {
+  MEM_TYPES, MEM_TOOLS, resolveMemoryRoot, searchQueryOf, clipText, buildMemoBlock,
+  searchArgs, showArgs, addArgs, runMem, addMemory, memoryHealth,
+} from '../lib/memory.mjs'
+
+const P = join(dirname(fileURLToPath(import.meta.url)), '..') + '/'
+const fail = []
+let total = 0
+const ok = (cond, msg) => { total++; if (!cond) fail.push(msg) }
+const tmpRoots = []
+const mk = (prefix) => { const d = mkdtempSync(join(tmpdir(), prefix)); tmpRoots.push(d); return d }
+
+/** 造一个"像记忆项目"的目录：scripts/mem.py + memory/index.md */
+function fakeMemoryProject({ withMemPy = true, withMemory = true, indexLines = 2 } = {}) {
+  const root = mk('bili-mem-')
+  if (withMemPy) {
+    mkdirSync(join(root, 'scripts'), { recursive: true })
+    // 假的 mem.py：用 node 跑（扩展名无所谓），把 argv 原样打出来 —— 验的是"参数怎么传"
+    writeFileSync(join(root, 'scripts', 'mem.py'), [
+      'const a = process.argv.slice(2)',
+      'const cmd = a[0] || ""',
+      'if (cmd === "search") process.stdout.write(JSON.stringify({ ok: 1, argv: a }) + "\\n")',
+      'else if (cmd === "add") process.stdout.write("wrote " + a[a.length - 1] + "\\n")',
+      'else process.stdout.write("cmd=" + cmd + "\\n")',
+      'process.exit(0)',
+    ].join('\n'), 'utf8')
+  }
+  if (withMemory) {
+    mkdirSync(join(root, 'memory', 'facts'), { recursive: true })
+    const idx = ['# 记忆索引', ''].concat(
+      Array.from({ length: indexLines }, (_, i) => '- 条目' + (i + 1) + ' — `memory/facts/x' + i + '.md` — 摘要' + (i + 1)),
+    ).join('\n')
+    writeFileSync(join(root, 'memory', 'index.md'), idx + '\n', 'utf8')
+  }
+  return root
+}
+
+// ① 找记忆根目录
+{
+  const good = fakeMemoryProject()
+  const r1 = resolveMemoryRoot({ memoryDir: good })
+  ok(r1.ok && r1.root === good, '显式填了合法目录却没认出来：' + JSON.stringify(r1))
+
+  const noPy = fakeMemoryProject({ withMemPy: false })
+  const r2 = resolveMemoryRoot({ memoryDir: noPy })
+  ok(!r2.ok && /scripts\/mem\.py/.test(r2.reason), '缺 mem.py 没报对原因：' + JSON.stringify(r2))
+
+  const noMem = fakeMemoryProject({ withMemory: false })
+  const r3 = resolveMemoryRoot({ memoryDir: noMem })
+  ok(!r3.ok && /memory\//.test(r3.reason), '缺 memory/ 没报对原因：' + JSON.stringify(r3))
+
+  // 没填记忆目录 ⇒ 退到工作区；工作区也不是记忆项目 ⇒ 明确说不带
+  const wsGood = fakeMemoryProject()
+  const r4 = resolveMemoryRoot({ memoryDir: '', workspace: wsGood })
+  ok(r4.ok && r4.root === wsGood && r4.from === '工作区', '工作区兜底没生效：' + JSON.stringify(r4))
+
+  const r5 = resolveMemoryRoot({ memoryDir: '', workspace: mk('bili-ws-') })
+  ok(!r5.ok && r5.reason.includes('没有'), '工作区不含记忆时应明确说原因：' + JSON.stringify(r5))
+
+  const r6 = resolveMemoryRoot({})
+  ok(!r6.ok, '什么都没填时不该认出一个记忆目录')
+
+  const h = memoryHealth({ memoryDir: good })
+  ok(h.ok && h.files === 2, 'memoryHealth 数索引行不对：' + JSON.stringify(h))
+}
+
+// ② 检索词
+{
+  ok(searchQueryOf(['DeepSeek Harness', '插件']) === 'DeepSeek Harness 插件', '关键词拼接不对')
+  ok(searchQueryOf([]) === '', '空关键词应返回空串')
+  ok(searchQueryOf(['  a  ', '', 'b  ']) === 'a b', '空白项没被清掉')
+  ok(searchQueryOf(['x'.repeat(300)]).length <= 200, '检索词没有长度上限')
+  ok(searchQueryOf(['a'], '额外') === 'a 额外', 'extra 没拼进去')
+}
+
+// ③ 截断
+{
+  ok(clipText('abc', 10) === 'abc', '没超限时不该改动')
+  const long = Array.from({ length: 200 }, (_, i) => '第' + i + '行').join('\n')
+  const cut = clipText(long, 200)
+  ok(cut.length < long.length && cut.includes('没显示'), '超限时没有截断说明')
+  ok(cut.includes('第0行'), '截断不应该从中间切掉开头')
+  ok(!/\n$/.test(cut), '截断后不该留尾随换行')
+}
+
+// ④ 提示词块
+{
+  ok(buildMemoBlock({ query: 'x', output: '' }) === '', '没有检索结果时不该拼记忆块')
+  ok(buildMemoBlock({ query: '', output: '有内容' }) === '', '没有检索词时不该拼记忆块')
+  ok(buildMemoBlock({ query: 'x', output: '无相关记忆' }) === '', '「无相关记忆」不该当成记忆注进去')
+  const block = buildMemoBlock({ query: 'dsH 插件', output: '候选1\n候选2', from: '设置里的记忆目录' })
+  ok(block.includes('你的长期记忆'), '记忆块缺标题')
+  ok(block.includes('dsH 插件'), '记忆块缺检索词')
+  ok(block.includes('bili_mem_show'), '记忆块没告诉它怎么回看原文')
+  ok(block.includes('以本轮看到的内容为准') || block.includes('以看到的为准'), '记忆块缺"内容优先于记忆"的规矩')
+}
+
+// ⑤ 命令参数（安全：一律列表传参，绝不拼 shell）
+{
+  ok(searchArgs('q').join(' ').includes('--mode local'), 'search 没走本地模式（会读 API key / 联网）')
+  // ⚠️ 分号留着是对的：它**留在同一个 argv 元素里**，没有 shell 解释它 ⇒ 不是注入面
+  const danger = searchArgs('q; rm -rf /')
+  ok(danger[1] === 'q; rm -rf /' && danger.length === 8, '可疑字符把参数个数改变了：' + JSON.stringify(danger))
+  ok(showArgs('memory/facts/x.md', { lines: '1-5' }).includes('--lines'), 'show 的 lines 参数没传')
+  ok(showArgs('memory/facts/x.md', { grep: 'k' }).includes('--grep'), 'show 的 grep 参数没传')
+  const a = addArgs({ type: 'fact', title: 't', summary: 's', bodyFile: 'f' })
+  ok(a.join(' ') === 'add --type fact --title t --summary s --body-file f', 'add 参数拼错：' + a.join(' '))
+}
+
+// ⑥ 真实 spawn（假 mem.py）
+{
+  const root = fakeMemoryProject()
+  const r = await runMem({ python: process.execPath, root, args: searchArgs('hello world') })
+  ok(r.ok, 'runMem 没跑起来：' + r.err)
+  ok(r.out.includes('hello world'), '参数没原样传到子进程：' + r.out)
+  const parsed = JSON.parse(r.out.trim())
+  ok(parsed.argv.length === searchArgs('hello world').length, '参数个数对不上')
+
+  const bad = await runMem({ python: 'definitely-not-a-python-' + Date.now(), root, args: ['search', 'x'] })
+  ok(!bad.ok && bad.err, 'python 不存在时应当 ok=false 而不是抛异常')
+}
+
+// ⑦ addMemory（写正文临时文件 + 类型校验 + 保留正文）
+{
+  const root = fakeMemoryProject()
+  const okRun = await addMemory({ python: process.execPath, root, type: 'fact', title: 't', summary: 's', body: '正文内容' })
+  ok(okRun.ok, 'addMemory 失败：' + okRun.err)
+  const badType = await addMemory({ python: process.execPath, root, type: 'secret', title: 't', summary: 's', body: 'b' })
+  ok(!badType.ok && /类型只能是/.test(badType.err), '非法类型没被拦住')
+  const noRoot = await addMemory({ python: process.execPath, root: '', type: 'fact', title: 't', summary: 's', body: 'b' })
+  ok(!noRoot.ok, '没有记忆目录时不该假装成功')
+}
+
+// ⑧ 接线：index.js 真的用上了
+{
+  const idx = readFileSync(P + 'index.js', 'utf8')
+  const cli = readFileSync(P + 'client.js', 'utf8')
+  const duty = readFileSync(P + 'prompts/duty.md', 'utf8')
+  const py = readFileSync(P + 'vendor/bilibili-mcp/mcp_server.py', 'utf8')
+
+  ok(/from '\.\/lib\/memory\.mjs'/.test(idx), 'index.js 没 import memory.mjs')
+  ok(idx.includes('memoryDir: z.string().default'), 'Config 里没有 memoryDir')
+  ok(idx.includes("if ('memoryDir' in p)"), 'persistCfg 没有钳 memoryDir')
+  ok(idx.includes('+ memoCache.block'), '提示词里没有把记忆块拼进去')
+  ok(idx.includes('没有预置记忆'), '没检索到记忆时没告诉模型可以自己用 bili_mem_search')
+  ok(idx.includes('if (memoryInfo().ok) list.push(...MEM_TOOLS)'), '白名单没按「配了记忆才给工具」下发')
+  ok(idx.includes('BILI_MEM_ROOT') && idx.includes('BILI_MEM_PYTHON'), 'overlay 没把记忆根目录传给 MCP')
+  ok(idx.includes('await prefetchMemory()'), '手动跑一轮前没有预取记忆')
+  ok(idx.includes('Promise.resolve(prefetchMemory())'), '定时器那条路没有预取记忆')
+  ok(idx.includes('memory: (() =>'), 'status 里没有记忆状态')
+
+  ok(cli.includes('memoryDir'), '设置页没有记忆目录输入框')
+  ok(cli.includes('setMemDir'), '设置页没有记忆目录草稿状态')
+
+  ok(duty.includes('长期记忆'), '章程没有长期记忆那一节')
+  ok(duty.includes('一轮最多写 2 条') || duty.includes('最多写 2 条'), '章程没写每轮写记忆的上限')
+  ok(duty.includes('不许写密钥'), '章程没写"不许记密钥"')
+
+  ok(py.includes('def bili_mem_search'), 'MCP 缺 bili_mem_search')
+  ok(py.includes('def bili_mem_show'), 'MCP 缺 bili_mem_show')
+  ok(py.includes('def bili_mem_add'), 'MCP 缺 bili_mem_add')
+  ok(!/shell\s*=\s*True/.test(py.split('def _mem_run')[1]?.slice(0, 1200) || ''), 'mem 子进程用了 shell=True（有注入面）')
+  ok(py.includes('MEM_TYPES'), 'MCP 没校验记忆类型')
+  ok(/startswith\("memory\/"\)/.test(py), 'MCP 没限制 show 只能读 memory/ 下的条目')
+  ok(py.includes('BILI_MEM_ROOT'), 'MCP 没读记忆根目录的环境变量')
+  ok(MEM_TOOLS.length === 3 && MEM_TOOLS.every((t) => t.startsWith('bili_mem_')), 'MEM_TOOLS 名单不对')
+  ok(MEM_TYPES.join(',') === 'fact,decision,howto,correction', '记忆类型名单变了')
+}
+
+for (const d of tmpRoots) { try { rmSync(d, { recursive: true, force: true }) } catch { /* 清不掉也无所谓 */ } }
+
+if (fail.length) {
+  console.error(`❌ 长期记忆接入自检失败（${fail.length}/${total}）：`)
+  for (const f of fail) console.error('  - ' + f)
+  process.exit(1)
+}
+console.log(`✅ 长期记忆接入通过（${total} 条断言）`)
