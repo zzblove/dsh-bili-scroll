@@ -1,6 +1,6 @@
 {
   "name": "dsh-bili-scroll",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "description": "DSH 插件：每天替你刷一轮 B站 —— 读字幕挑出值得的、写一份日报，值得的就 @ 你",
   "keywords": [
     "dsh",
@@ -10,9 +10,14 @@
     "mcp",
     "duty"
   ],
-  "repository": { "type": "git", "url": "git+https://github.com/c1overzz/dsh-bili-scroll.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/c1overzz/dsh-bili-scroll.git"
+  },
   "homepage": "https://github.com/c1overzz/dsh-bili-scroll#readme",
-  "bugs": { "url": "https://github.com/c1overzz/dsh-bili-scroll/issues" },
+  "bugs": {
+    "url": "https://github.com/c1overzz/dsh-bili-scroll/issues"
+  },
   "license": "MIT",
   "type": "module",
   "main": "index.js",
@@ -46,7 +51,8 @@
     "@deepseek-ai/schemastery": "*"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.1"
+    "@deepseek-ai/schemastery": "*",
+    "@larksuiteoapi/node-sdk": "^1.76.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-tools": {

@@ -251,6 +251,11 @@ function WatchTab() {
       // ⭐ 2.7.0：飞书日报
       const [feishuUrl, setFeishuUrl] = React.useState(null)
       const [feishuBusy, setFeishuBusy] = React.useState(false)
+      // ⭐ 2.8.0：飞书聊天
+      const [fchatId, setFchatId] = React.useState(null)
+      const [fchatSecret, setFchatSecret] = React.useState(null)
+      const [fchatBusy, setFchatBusy] = React.useState('')
+      const [fchatMsg, setFchatMsg] = React.useState('')
       const [feishuMsg, setFeishuMsg] = React.useState('')
       const [rl, setRl] = React.useState(null)
       const [newVer, setNewVer] = React.useState('')       // 发现的新版本号（空 = 没发现）          // 日报形态：full / brief / off
@@ -295,6 +300,8 @@ function WatchTab() {
         if (cfg && memEmbed === null) setMemEmbed(cfg.memoryEmbedModel || '')
         if (cfg && memRerank === null) setMemRerank(cfg.memoryRerankModel || '')
         if (cfg && feishuUrl === null) setFeishuUrl(cfg.feishuWebhook || '')
+        if (cfg && fchatId === null) setFchatId(cfg.feishuAppId || '')
+        if (cfg && fchatSecret === null) setFchatSecret(cfg.feishuAppSecret || '')
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
@@ -578,6 +585,30 @@ function WatchTab() {
           if (r?.ok) setFeishuMsg(`✓ 已发送（带了今天日报的前 ${Math.min(3, r.picks || 0)} 条）—— 去飞书群里看一眼`)
           else setFeishuMsg('✗ 失败：' + (r?.error || r?.err || ('code ' + (r?.code ?? '?'))))
         } catch (e) { setFeishuMsg('✗ 失败：' + String(e?.message ?? e)) } finally { setFeishuBusy(false) }
+      }
+
+      // ⭐ 2.8.0：飞书聊天
+      const fchatCheck = async () => {
+        setFchatBusy('check')
+        setFchatMsg('正在检查凭证…')
+        try {
+          const r = await jpost('/feishu/chat/check', {})
+          setFchatMsg(r?.ok ? '✓ 凭证有效，长连接已重建' : '✗ ' + (r?.err || ('code ' + (r?.code ?? '?'))))
+        } catch (e) { setFchatMsg('✗ ' + String(e?.message ?? e)) } finally { setFchatBusy('') }
+      }
+      const fchatPairReset = async () => {
+        setFchatBusy('pair')
+        try {
+          const r = await jpost('/feishu/chat/pair/reset', {})
+          setFchatMsg(r?.ok ? '已换新配对码：' + (r.pairCode || '') + '（去飞书发 /pair 码）' : '重置失败')
+        } catch (e) { setFchatMsg('✗ ' + String(e?.message ?? e)) } finally { setFchatBusy('') }
+      }
+      const fchatSessionReset = async () => {
+        setFchatBusy('sess')
+        try {
+          const r = await jpost('/feishu/chat/session/reset', {})
+          setFchatMsg(r?.ok ? '会话已重置（下一条飞书消息开新会话；长期记忆不受影响）' : '重置失败')
+        } catch (e) { setFchatMsg('✗ ' + String(e?.message ?? e)) } finally { setFchatBusy('') }
       }
 
       const onSaveText = async () => {
@@ -878,6 +909,44 @@ function WatchTab() {
                 ? (st.feishu.last.ok ? '上次推送：成功 · ' : '上次推送：失败 · ') + String(st.feishu.last.at || '').slice(0, 19).replace('T', ' ')
                   + (st.feishu.last.ok ? '' : '（' + (st.feishu.last.error || '') + '）')
                 : '还没推送过'))),
+          // ⭐ 2.8.0：飞书聊天（自建应用 + 长连接，不需要公网）
+          h('div', { 'data-bd-label': '' }, '飞书聊天（在飞书里直接跟它说话）'),
+          h('div', { 'data-bd-note': '' },
+            '需要飞书「企业自建应用」：填 App ID / Secret；权限加 `im:message`（收发消息）；'
+            + '事件订阅选「长连接」并添加 `im.message.receive_v1`；发布版本后，在飞书里给它发「/pair 配对码」。'),
+          h('input', {
+            'data-bd-input': '', placeholder: 'App ID（cli_…）', value: fchatId ?? '',
+            onChange: (e) => setFchatId(e.target.value),
+            onBlur: () => patch({ feishuAppId: String(fchatId || '').trim() }, '飞书 App ID'),
+          }),
+          h('input', {
+            'data-bd-input': '', type: 'password', placeholder: 'App Secret（只存本机，不回显）', value: fchatSecret ?? '',
+            onChange: (e) => setFchatSecret(e.target.value),
+            onBlur: () => patch({ feishuAppSecret: String(fchatSecret || '').trim() }, '飞书 App Secret'),
+          }),
+          h(ToggleRow, {
+            label: '开启飞书聊天（长连接）',
+            note: '不需要公网地址。只服务配对过的那一个飞书账号，其他人发消息会被拒绝。',
+            on: Boolean(cfg.feishuChat),
+            onChange: (v) => patch({ feishuChat: v }, '飞书聊天'),
+          }),
+          (() => {
+            const f = st.feishuChat || {}
+            return [
+              h('div', { 'data-bd-note': '' },
+                (f.on ? (f.connected ? '✓ 已连接（长连接）' : '⚠️ 开关开着、还没连上（看 duty.log）') : '聊天没开')
+                + (f.paired ? ' · 已配对' : ' · 未配对')
+                + (f.session ? ' · 会话已记录' : ' · 还没有会话')),
+              h('div', { 'data-bd-note': '' },
+                f.paired ? '' : ('配对码：' + (f.pairCode || '……') + ' —— 在飞书里发「/pair ' + (f.pairCode || '……') + '」')),
+              h('div', { 'data-bd-row': '' },
+                h('button', { 'data-bd-btn': '', disabled: fchatBusy === 'check', onClick: fchatCheck }, fchatBusy === 'check' ? '检查中…' : '检查凭证'),
+                h('button', { 'data-bd-btn': '', disabled: fchatBusy === 'pair', onClick: fchatPairReset }, '重新配对'),
+                h('button', { 'data-bd-btn': '', disabled: fchatBusy === 'sess', onClick: fchatSessionReset }, '重置会话')),
+              h('div', { 'data-bd-note': '' }, fchatMsg
+                || (f.last && f.last.at ? '上次回复：' + (f.last.ok ? '成功' : '失败') + ' · ' + String(f.last.at).slice(0, 19).replace('T', ' ') : '')),
+            ]
+          })(),
           h('div', { 'data-bd-label': '' }, '日报写多细'),
           h('select', {
             'data-bd-input': '', value: rl ?? 'full',

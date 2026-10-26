@@ -35,6 +35,7 @@ import { buildDutyPatch } from './lib/dutyprofile.mjs'
 import { MEM_TOOLS, memoryHealth, memoryTypes, searchQueryOf, searchMemory, buildMemoBlock, clipText, keyState, writeKey, testSemantic, buildVectorsNow, semanticReady } from './lib/memory.mjs'
 import { findRoundSession, readUsage, formatUsage } from './lib/usage.mjs'
 import { isFeishuWebhook, parseReportPicks, sendReport } from './lib/feishu.mjs'
+import { parseIncoming, parsePairCommand, makePairCode, replyPrompt, startWs, checkCreds, sendText } from './lib/feishuChat.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { resolveUid } from './lib/uid.mjs'
 import { loadCred as dmCred, listSessions as dmList, fetchMsgs as dmFetch } from './lib/dm.mjs'
@@ -107,6 +108,12 @@ export const Config = !z ? undefined : z.object({
   feishuWebhook: z.string().default('').extra('volatile', true),
   /** 推什么：full=标题+UP+理由 · links=只标题和链接 · usage=只发用量 */
   feishuDetail: z.string().default('full').extra('volatile', true),
+  /** ⭐ 2.8.0：在飞书里聊天（自建应用 + 长连接，不需要公网） */
+  feishuChat: z.boolean().default(false).extra('volatile', true),
+  feishuAppId: z.string().default('').extra('volatile', true),
+  feishuAppSecret: z.string().default('').extra('volatile', true),
+  /** 配对成功后自动写入：只服务这一个 open_id */
+  feishuOwnerOpenId: z.string().default('').extra('volatile', true),
   /** 私信监听：只认主人本人发来的私信，有新消息就回一句 · 2.0 起默认开（查私信不花 token，只有真有人发消息才回一句） */
   dmWatch: z.boolean().default(true).extra('volatile', true),
   /** 私信监听间隔（分钟，最小 3） */
@@ -262,7 +269,7 @@ function reportMeta() {
     personaPrompt: '',
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'only', dmUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', memoryDir: '', memorySemantic: false, memoryBaseUrl: '', memoryEmbedModel: '', memoryRerankModel: '', dmUsage: true, feishuOn: false, feishuWebhook: '', feishuDetail: 'full', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
+    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', memoryDir: '', memorySemantic: false, memoryBaseUrl: '', memoryEmbedModel: '', memoryRerankModel: '', dmUsage: true, feishuOn: false, feishuWebhook: '', feishuDetail: 'full', feishuChat: false, feishuAppId: '', feishuAppSecret: '', feishuOwnerOpenId: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -312,6 +319,10 @@ function reportMeta() {
     if ('feishuOn' in p) p.feishuOn = Boolean(p.feishuOn)
     if ('feishuWebhook' in p) p.feishuWebhook = String(p.feishuWebhook || '').trim().slice(0, 500)
     if ('feishuDetail' in p) p.feishuDetail = ['full', 'links', 'usage'].includes(String(p.feishuDetail)) ? String(p.feishuDetail) : 'full'
+    if ('feishuChat' in p) p.feishuChat = Boolean(p.feishuChat)
+    if ('feishuAppId' in p) p.feishuAppId = String(p.feishuAppId || '').trim().slice(0, 120)
+    if ('feishuAppSecret' in p) p.feishuAppSecret = String(p.feishuAppSecret || '').trim().slice(0, 200)
+    if ('feishuOwnerOpenId' in p) p.feishuOwnerOpenId = String(p.feishuOwnerOpenId || '').trim().slice(0, 120)
     for (const k of ['memoryBaseUrl', 'memoryEmbedModel', 'memoryRerankModel']) {
       if (k in p) p[k] = String(p[k] || '').trim().slice(0, 300)
     }
@@ -1441,6 +1452,9 @@ function reportMeta() {
    *    mcp_server.py 那头**不在白名单里的工具根本不注册** —— 连名字都不给它看见 ✓。
    *    要读全就手工改这个列表（或者直接跑 mcp_server.py，不设这个变量 = 全放）。
    */
+  /* ⭐ 2.8.0：这一轮是谁发起的（duty=定时/手动 · dm=私信 · feishu=飞书）。
+   *    只有"通道那一轮"才下发对应的发送工具 —— 否则值班轮可能顺手往你的私信/飞书发东西。 */
+  let roundChannel = 'duty'
   const mcpWhitelist = () => {
     const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info',
       'bili_cover', 'bili_frames', 'bili_danmaku', 'bili_recommend']  // 看封面 / 画面帧 / 弹幕：只读，不需要额外的闸
@@ -1461,6 +1475,8 @@ function reportMeta() {
     // ⭐ 长期记忆（2.3.0）：只有这一轮真的配了记忆目录才下发这三只 ——
     //    没配就别让模型拿着一堆"搜不到东西"的工具空转（免得它以为自己在写记忆、其实写不进去）
     if (memoryInfo().ok) list.push(...MEM_TOOLS)
+    // ⭐ 2.8.0：飞书那一轮才给 feishu_send_message（和 bili_send_message 同一个道理）
+    if (roundChannel === 'feishu') list.push('feishu_send_message')
     return list
   }
 
@@ -1604,6 +1620,14 @@ function reportMeta() {
         '          - ' + yq(posix(script)),
         '        env:',
         '          BILI_MCP_TOOLS: ' + yq(mcpWhitelist().join(',')),
+        // ⭐ 2.8.0：飞书那一轮才把应用凭证交给 MCP（它要调飞书 API 发回复；硬闸在 Python 侧）
+        ...(roundChannel === 'feishu'
+          ? [
+            '          FEISHU_APP_ID: ' + yq(cfg.feishuAppId || ''),
+            '          FEISHU_APP_SECRET: ' + yq(cfg.feishuAppSecret || ''),
+            '          FEISHU_OWNER_OPEN_ID: ' + yq(cfg.feishuOwnerOpenId || ''),
+          ]
+          : []),
         // ⭐ 长期记忆：把「记忆项目根目录」「用哪种执行器（python / node）」「允许写的类型」交给 MCP 子进程
         //   （它跑在沙箱外，检索 / 写入由它代劳；路径同样按 YAML 单引号规则转义）
         ...(() => {
@@ -2054,6 +2078,157 @@ function reportMeta() {
       return { ok: true }
     } catch (e) { log('私信回复出错：' + String(e?.message ?? e)); return { ok: false } }
   }
+
+  /* ⭐⭐ 2.8.0：**飞书聊天**（自建应用 + 长连接，不需要公网）——
+   *   和私信同构：配对过的主人发消息 → 起一轮 headless（续同一个会话）→ 模型用
+   *   `feishu_send_message` 把回复发回去（MCP 侧还有一道"只发给主人"的硬闸）。
+   *   ⚠️ 配对不是"谁先发谁绑定"：要在设置页看配对码，然后在飞书里发 `/pair 码`。 */
+  const feishuChatFile = join(stateDir, 'feishu-chat.json')
+  const readFeishuChat = () => { try { return JSON.parse(readFileSync(feishuChatFile, 'utf8')) || {} } catch { return {} } }
+  const writeFeishuChat = (patch) => { try { writeJson(feishuChatFile, { ...readFeishuChat(), ...patch }) } catch { /* 下次再说 */ } }
+  let feishuWs = null
+  let feishuSig = ''
+  let feishuReplyRunning = false
+  let feishuLast = { at: '', ok: null, error: '' }
+
+  const feishuPairCode = () => {
+    const st = readFeishuChat()
+    if (st.pairCode) return st.pairCode
+    const code = makePairCode()
+    writeFeishuChat({ pairCode: code })
+    return code
+  }
+  const feishuChatStatus = () => {
+    const st = readFeishuChat()
+    return {
+      on: Boolean(cfg.feishuChat),
+      appIdSet: Boolean(String(cfg.feishuAppId || '').trim()),
+      secretSet: Boolean(String(cfg.feishuAppSecret || '').trim()),
+      paired: Boolean(String(cfg.feishuOwnerOpenId || '').trim()),
+      pairCode: st.pairCode || feishuPairCode(),
+      session: st.sessionId || '',
+      connected: Boolean(feishuWs),
+      running: feishuReplyRunning,
+      last: feishuLast,
+    }
+  }
+
+  const feishuPersona = () => {
+    try {
+      const t = String(cfg.personaPrompt || '').trim()
+      if (t) return t.slice(0, 3000)
+      const ws = String(cfg.workspace || '').trim()
+      if (!ws) return ''
+      const p = join(ws, 'AGENTS.md')
+      return existsSync(p) ? readFileSync(p, 'utf8').slice(0, 3000) : ''
+    } catch { return '' }
+  }
+
+  function runFeishuReply(openId, text) {
+    try {
+      refreshCfg()
+      if (feishuReplyRunning) { log('飞书回复：上一条还在跑 ⇒ 这条先记录、下一跳再回'); return { ok: false, busy: true } }
+      const dsh = resolveDsh()
+      if (dsh.missing) { log('飞书回复没跑：找不到 dsh（' + dsh.hint + '）'); return { ok: false } }
+      feishuReplyRunning = true
+      const st = readFeishuChat()
+      const savedSid = String(st.sessionId || '')
+      // ⭐ 这一轮是"飞书轮"：白名单里加 feishu_send_message，overlay 里带应用凭证
+      roundChannel = 'feishu'
+      let overlay = null
+      let base = []
+      try {
+        overlay = ensureOverlay()
+        base = [...dsh.args, '--profile', effectiveProfile()]
+      } finally { roundChannel = 'duty' }
+      if (overlay) base.push('--patch', overlay)
+      const prompt = replyPrompt({ text, persona: feishuPersona(), continuing: Boolean(savedSid) })
+      const args = savedSid ? [...base, '--session-id', savedSid, prompt] : [...base, prompt]
+      log(`飞书回复开跑` + (savedSid ? '（续会话 ' + savedSid.slice(0, 18) + '…）' : '（开新会话）'))
+      const startedAt = Date.now()
+      const child = spawn(dsh.command, args, {
+        cwd: stateDir, shell: dsh.shell, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+        env: uvEnv({ BILI_DUTY_HOME: stateDir, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
+      })
+      const toText = (buf) => { try { const b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf)); const u = b.toString('utf8'); return u.includes('\uFFFD') ? (() => { try { return new TextDecoder('gbk').decode(b) } catch { return u } })() : u } catch { return String(buf) } }
+      const pick = (buf) => { try { appendFileSync(logFile, toText(buf), 'utf8') } catch { /* 丢日志也不能抛 */ } }
+      child.stdout?.on('data', pick)
+      child.stderr?.on('data', pick)
+      child.on('exit', (code) => {
+        feishuReplyRunning = false
+        feishuLast = { at: new Date().toISOString(), ok: code === 0, error: code === 0 ? '' : 'exit ' + code }
+        log(`飞书回复结束（code=${code}）`)
+        rotateLogIfBig()
+        if (!savedSid && code === 0) {
+          const id = discoverDmSession(startedAt)
+          if (id) { writeFeishuChat({ sessionId: id, at: new Date().toISOString() }); log('飞书会话已记录：' + id.slice(0, 24) + '…（以后飞书都接着这个会话）') }
+          else log('⚠️ 飞书：没找到这次的会话 id ⇒ 下一条还是新会话（不影响回复，只是没上下文）')
+        }
+        if (savedSid && code !== 0) {
+          writeFeishuChat({ sessionId: '' })
+          log('⚠️ 飞书续会话失败 ⇒ 清掉 id，用新会话重试一次（这条不能没回）')
+          setTimeout(() => { try { runFeishuReply(openId, text) } catch { /* 兜住 */ } }, 800)
+        }
+      })
+      return { ok: true }
+    } catch (e) { log('飞书回复出错：' + String(e?.message ?? e)); return { ok: false } }
+  }
+
+  /** 收到一条飞书消息：配对 / 授权 / 起一轮 */
+  async function onFeishuMessage(msg) {
+    const appId = String(cfg.feishuAppId || '').trim()
+    const appSecret = String(cfg.feishuAppSecret || '').trim()
+    const owner = String(cfg.feishuOwnerOpenId || '').trim()
+    const code = parsePairCommand(msg.text)
+    if (code && code === String(readFeishuChat().pairCode || '')) {
+      await persistCfg({ feishuOwnerOpenId: msg.openId })
+      writeFeishuChat({ pairCode: '', pairedAt: new Date().toISOString() })
+      await sendText({ appId, appSecret, openId: msg.openId, text: '配对成功 ✓ 以后在飞书里直接跟我说话就行（我会记得我们聊过的）。' })
+      log('飞书：已配对 open_id=' + msg.openId.slice(0, 12) + '…')
+      return
+    }
+    if (!owner) {
+      await sendText({ appId, appSecret, openId: msg.openId, text: '还没配对：打开 dsh 设置 → 刷B站 → 飞书聊天，把那里显示的配对码发给我（/pair 配对码）。' })
+      log('飞书：收到未配对的消息，已提示配对')
+      return
+    }
+    if (msg.openId !== owner) {
+      await sendText({ appId, appSecret, openId: msg.openId, text: '这台助手只服务主人，未授权。' })
+      log('飞书：非主人消息已拒（' + msg.openId.slice(0, 10) + '…）')
+      return
+    }
+    runFeishuReply(msg.openId, msg.text)
+  }
+
+  const stopFeishuChat = () => {
+    try { feishuWs?.stop?.() } catch { /* 已经断了 */ }
+    feishuWs = null
+    feishuSig = ''
+  }
+  async function ensureFeishuChat() {
+    try {
+      const appId = String(cfg.feishuAppId || '').trim()
+      const secret = String(cfg.feishuAppSecret || '').trim()
+      const sig = [Boolean(cfg.feishuChat), appId, secret].join('|')
+      if (!cfg.feishuChat) { if (feishuWs) { stopFeishuChat(); log('飞书聊天：已关闭') } return }
+      if (!appId || !secret) { log('飞书聊天：还缺 App ID / App Secret'); return }
+      if (feishuWs && sig === feishuSig) return
+      if (feishuWs) stopFeishuChat()
+      feishuPairCode()
+      const r = await startWs({
+        appId,
+        appSecret: secret,
+        onMessage: (m) => { Promise.resolve(onFeishuMessage(m)).catch((e) => log('飞书消息处理出错：' + String(e?.message ?? e).slice(0, 160))) },
+        log,
+      })
+      feishuWs = r
+      feishuSig = sig
+      log('飞书聊天已连接（长连接）')
+    } catch (e) {
+      log('飞书聊天启动失败：' + String(e?.message ?? e).slice(0, 200))
+    }
+  }
+  const reloadFeishuChat = () => { ensureFeishuChat().catch(() => {}) }
 
   let dmTimer = null
   let dmBusy = false
@@ -2721,6 +2896,8 @@ function reportMeta() {
       usage: (() => { try { return usageSummary() } catch { return { last: null, lastLine: '', today: null } } })(),
       // ⭐ 2.7.0：飞书日报推送状态（开着没开、地址像不像飞书的、上次成没成）
       feishu: (() => { try { return feishuStatus() } catch { return { on: false, hasWebhook: false, detail: 'full', last: null } } })(),
+      // ⭐ 2.8.0：飞书聊天状态（配对码 / 连没连上 / 上次回复成没成）
+      feishuChat: (() => { try { return feishuChatStatus() } catch { return { on: false, paired: false, pairCode: '', connected: false, session: '', last: null } } })(),
       venvReady: venvReadyNow(),
       version: myVersion(),
       // 2026-10-22：缺哪个 Python 包装不上，得能一眼看出来（出不了二维码 =09 缺 qrcode）
@@ -2835,6 +3012,8 @@ function reportMeta() {
       if ('dmUid' in patch) patch.dmUid = Math.max(0, Math.min(Number(patch.dmUid) || 0, Number.MAX_SAFE_INTEGER))
       const { clean, host } = await persistCfg(patch)
       log(`设置已更新：${JSON.stringify(clean)}（DSH 那边${host.ok ? '已同步' : '没写成：' + host.error}）`)
+      // 飞书聊天：开关 / 凭证变了就重建长连接（不用重启 dsh）
+      try { reloadFeishuChat() } catch { /* 连接失败只记日志 */ }
       return sendJson(res, 200, { ok: true, config: cfg, host })
     }
 
@@ -2908,6 +3087,31 @@ function reportMeta() {
       const r = await sendReport({ url, day: dayKey(), picks: picks.slice(0, 3), usage, detail: cfg.feishuDetail })
       log('飞书测试：' + (r.ok ? '已发送' : '失败 ' + (r.err || r.code)))
       return sendJson(res, 200, { ...r, picks: picks.length })
+    }
+
+    /* ── 飞书聊天（2.8.0）── */
+    if (req.method === 'GET' && path === '/api/bili-duty/feishu/chat') {
+      return sendJson(res, 200, { ok: true, ...feishuChatStatus() })
+    }
+    // 「检查凭证」：纯 HTTPS 换 tenant_access_token，不通就当场告诉你
+    if (req.method === 'POST' && path === '/api/bili-duty/feishu/chat/check') {
+      const r = await checkCreds({ appId: String(cfg.feishuAppId || '').trim(), appSecret: String(cfg.feishuAppSecret || '').trim() })
+      log('飞书凭证检查：' + (r.ok ? '通过' : '失败 ' + (r.err || r.code)))
+      try { reloadFeishuChat() } catch { /* 连接失败只记日志 */ }
+      return sendJson(res, 200, r)
+    }
+    // 「重新配对」：换一个配对码 + 清掉已配对的主人
+    if (req.method === 'POST' && path === '/api/bili-duty/feishu/chat/pair/reset') {
+      writeFeishuChat({ pairCode: makePairCode(), pairedAt: '', sessionId: '' })
+      await persistCfg({ feishuOwnerOpenId: '' })
+      log('飞书：已重置配对（新配对码见设置页）')
+      return sendJson(res, 200, { ok: true, ...feishuChatStatus() })
+    }
+    // 「重置会话」：下一条飞书消息开新会话（长期记忆不受影响）
+    if (req.method === 'POST' && path === '/api/bili-duty/feishu/chat/session/reset') {
+      writeFeishuChat({ sessionId: '' })
+      log('飞书：已重置会话（下一条消息开新会话）')
+      return sendJson(res, 200, { ok: true, ...feishuChatStatus() })
     }
 
     /* ── 长期记忆：语义检索的 key / 自检 / 建向量（2.5.0）──
@@ -3288,6 +3492,9 @@ function reportMeta() {
   } catch (e) { log(`HTTP 路由没挂上：${e?.message ?? e}`) }
 
   ctx.effect(() => () => { try { mcp?.stop() } catch { /* 收摊 */ } }, 'bili-duty: 收 MCP 子进程')
+  ctx.effect(() => () => { stopFeishuChat() }, 'bili-duty: 收飞书长连接')
+  // ⭐ 2.8.0：开机就把飞书聊天连上（配了才连；失败只记日志）
+  setTimeout(() => { try { reloadFeishuChat() } catch { /* 兜住 */ } }, 1500)?.unref?.()
   try { ensureDutyProfile() } catch { /* 上面已记日志 */ }
   if (dutyProfileState === 'ok') log('值班轮用最小权限 profile：bili-duty（无文件系统 / 无命令 / 无联网）')
   else log('⚠️ 最小权限 profile 不可用（' + dutyProfileState + '）⇒ 值班轮仍用 headless（这一轮能力偏大）')

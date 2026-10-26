@@ -54,6 +54,13 @@
   · `tools/test-memory.mjs` —— 「长期记忆」接入的回归检查（读 / 写 / 注入 / 参数注入面）。
     动了 `lib/memory.mjs`、`bili_mem_*` 三只 MCP 工具、或提示词里拼记忆那段就跑一次：
     `node tools/test-memory.mjs`（含一次真实 spawn，用假的 mem.py，不需要 python）
+  · `tools/test-usage.mjs` —— 「本轮 token 用量」的回归检查（会话目录命名、投影缓存解析、按时间找会话、接线）。
+    动了 `lib/usage.mjs` 或轮结束那段收集逻辑就跑一次：`node tools/test-usage.mjs`
+  · `tools/test-feishu.mjs` —— 「飞书日报推送」的回归检查（地址白名单、日报解析、三种卡片档位、失败兜底）。
+    动了 `lib/feishu.mjs` 或推送接线就跑一次：`node tools/test-feishu.mjs`
+  · `tools/test-feishu-chat.mjs` —— 「飞书聊天」的回归检查（事件解析、配对码、提示词、凭证检查、硬闸、通道隔离）。
+    动了 `lib/feishuChat.mjs`、`feishu_send_message` 这只 MCP 工具、或 `roundChannel` 那段就跑一次：
+    `node tools/test-feishu-chat.mjs`
   · `tools/check-vision.py` —— 看图纯函数的回归检查（不联网）。动了 `_https` / `_cover_url` / `_snapshot_entries` / `_crop_tile` 就跑一次：
     `<家目录>/.venv/Scripts/python.exe tools/check-vision.py`（用插件自己的 venv，里面才有 Pillow）
 

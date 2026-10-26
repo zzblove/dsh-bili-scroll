@@ -1192,6 +1192,80 @@ async def bili_send_message(receiver_uid: int, text: str) -> str:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
 
+# ========== 飞书聊天出口（2.8.0）==========
+# ⭐ 「在飞书里聊天」那一轮，模型用这只工具把回复发回去。
+#   硬闸：**只允许发给配对过的主人 open_id**（env FEISHU_OWNER_OPEN_ID 下发）；
+#   传别人的 open_id 一律拒绝 —— 和私信那条同样是"只服务主人"。
+#   凭证只在"飞书那一轮"才通过 overlay 下发（宿主的 roundChannel==='feishu'）。
+FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "").strip()
+FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "").strip()
+FEISHU_OWNER_OPEN_ID = os.environ.get("FEISHU_OWNER_OPEN_ID", "").strip()
+FEISHU_API = "https://open.feishu.cn"
+
+
+def _feishu_post(path: str, payload: dict, token: str = "") -> dict:
+    import urllib.request
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(
+        FEISHU_API + path, data=json.dumps(payload).encode("utf-8"),
+        headers=headers, method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _feishu_tenant_token() -> str:
+    if not FEISHU_APP_ID or not FEISHU_APP_SECRET:
+        raise RuntimeError("这一轮没有飞书应用凭证（宿主没下发 FEISHU_APP_ID/SECRET）")
+    data = _feishu_post("/open-apis/auth/v3/tenant_access_token/internal",
+                        {"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET})
+    if int(data.get("code", -1)) != 0:
+        raise RuntimeError("拿飞书 token 失败：" + str(data.get("msg") or data.get("code")))
+    return str(data.get("tenant_access_token") or "")
+
+
+@tool()
+def feishu_send_message(text: str, open_id: str = "") -> str:
+    """
+    把回复发到**飞书**里配对过的主人（「在飞书里聊天」那一轮用）。
+
+    Args:
+        text: 回复正文（纯文本，≤150 字最好；不要 markdown 星号/表格）
+        open_id: 收件人的 open_id；**留空 = 发给主人**。传别人的会被拒绝（硬闸）
+
+    Returns:
+        发送结果（成功 / 被拒绝的原因）
+    """
+    body = str(text or "").strip()
+    if not body:
+        return json.dumps({"ok": False, "error": "text 不能为空"}, ensure_ascii=False)
+    if not FEISHU_OWNER_OPEN_ID:
+        return json.dumps({"ok": False, "error": "还没有配对的主人（宿主没下发 FEISHU_OWNER_OPEN_ID）"}, ensure_ascii=False)
+    target = str(open_id or "").strip() or FEISHU_OWNER_OPEN_ID
+    if target != FEISHU_OWNER_OPEN_ID:
+        return json.dumps({
+            "ok": False, "blocked": True,
+            "error": "飞书回复只能发给配对过的主人（open_id 不匹配），不能发给其他人。",
+            "allowedOpenId": FEISHU_OWNER_OPEN_ID,
+        }, ensure_ascii=False)
+    try:
+        token = _feishu_tenant_token()
+        data = _feishu_post(
+            "/open-apis/im/v1/messages?receive_id_type=open_id",
+            {"receive_id": target, "msg_type": "text",
+             "content": json.dumps({"text": body[:1500]}, ensure_ascii=False)},
+            token,
+        )
+        code = int(data.get("code", -1))
+        if code != 0:
+            return json.dumps({"ok": False, "error": "飞书接口拒绝：" + str(data.get("msg") or code)}, ensure_ascii=False)
+        return json.dumps({"ok": True, "messageId": str((data.get("data") or {}).get("message_id") or "")}, ensure_ascii=False)
+    except Exception as e:      # noqa: BLE001 —— 发不出去也不能让这一轮崩
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
 # ========== Tool 22: 未读消息 ==========
 
 @tool()
