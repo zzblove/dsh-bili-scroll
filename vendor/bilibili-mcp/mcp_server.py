@@ -1510,14 +1510,16 @@ def bili_mem_show(path: str, grep: str = "", lines: str = "") -> str:
 @tool()
 def bili_mem_add(type: str, title: str, summary: str, body: str, scope: str = "", source: str = "") -> str:
     """
-    把一条**值得跨天保留**的观察写进长期记忆（走 mem.py add：带写锁 + 去重 + 索引更新）。
+    把一条**值得跨天保留**的观察写进长期记忆（带写锁 + 去重 + 索引更新）。
 
     Args:
-        type: fact（环境事实）/ decision（技术决策）/ howto（有效步骤）/ correction（更正旧条目）
+        type: 类型以**项目的分类档案**为准 —— 调用时看这一轮开头 / 工具列表给出的名单；
+              工程档案是 fact / decision / howto，刷视频档案是 taste / video / talk / creator；
+              correction 两套都有，用来更正旧条目（需要 supersedes，见下）
         title: 主题（一个主题一个文件，别把三件事塞一条）
         summary: 一句话摘要（≤200 字）
-        body: 正文（≤4000 字）：背景、结论、依据；**不要写密钥、临时调试信息、代码里直接可见的内容**
-        scope: 适用范围（可选，如 memory-tooling / bilibili）
+        body: 正文（≤4000 字）：结论、依据；**不要写密钥、临时调试信息、代码里直接可见的内容**
+        scope: 适用范围（可选，如 bilibili）
         source: 依据（可选，如看到的视频 BV 号 / 日志路径）
 
     Returns:

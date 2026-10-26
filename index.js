@@ -1716,7 +1716,10 @@ function reportMeta() {
     child.on('error', (e) => { releaseRunLock(); log(`刷B站起不来：${e?.message ?? e}`) })
     // ⭐ 起不来/被杀掉也要把锁放开，否则之后每一轮都会被判成'上一轮还没结束' ✗
     child.on('close', () => { if (dutyChild === child) dutyChild = null })
-    return { started: true, why, profile: cfg.headlessProfile, cwd, log: logFile }
+    // ⭐ 2.3.2：这里要报**真正生效**的 profile，不是配置里那个值 ——
+    //    `headlessProfile` 默认写的是 headless，但实际会被 `effectiveProfile()` 换成 bili-duty；
+    //    以前返回配置值，日志/工具回包会误导人以为"没走最小权限 profile" ✗
+    return { started: true, why, profile: effectiveProfile(), cwd, log: logFile }
    } catch (e) {
     log(`刷B站开跑失败（${why}）：${e?.stack ?? e}`)
     return { started: false, why, error: String(e?.message ?? e) }
