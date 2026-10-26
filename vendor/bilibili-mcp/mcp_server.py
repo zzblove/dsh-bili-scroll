@@ -1395,30 +1395,52 @@ def duty_digest_append(text: str) -> str:
 #     **不给就不启用**，工具会明确说"这一轮没配记忆目录"，不会假装写成功 ✓
 #   · 所有子命令都走 `--mode local` 检索 / `add` 走那套带写锁的去重逻辑 —— 
 #     参数一律**列表传参**（不经 shell），标题/正文里带引号、分号都不会被当成命令 ✓
-#   · 写入类型只认 fact / decision / howto / correction；长度都钳住，别让一整轮报告塞进记忆
+#   · 写入类型以项目档案为准（`memory/.profile.json`）：工程档案是 fact/decision/howto，
+#     bili 档案是 taste/video/talk/creator；类型名单由宿主通过 `BILI_MEM_TYPES` 下发 ✓
+#   · 执行器也由宿主指定：有 Python 版用 `mem.py`，只有 Node 版（memory-kit）就用 `mem.js`；
+#     桌面版里 node 就是 Electron 本体，所以走 `BILI_MEM_NODE` + `ELECTRON_RUN_AS_NODE=1` ✓
 import subprocess as _sub
 
 MEM_ROOT = os.environ.get("BILI_MEM_ROOT", "").strip()
 MEM_PYTHON = os.environ.get("BILI_MEM_PYTHON", "").strip() or sys.executable
-MEM_TYPES = ("fact", "decision", "howto", "correction")
+MEM_RUNNER = os.environ.get("BILI_MEM_RUNNER", "").strip() or "python"
+MEM_NODE = os.environ.get("BILI_MEM_NODE", "").strip()
+MEM_TYPES = tuple(t.strip() for t in os.environ.get("BILI_MEM_TYPES", "").split(",") if t.strip()) \
+    or ("fact", "decision", "howto", "correction")
 
 
 def _mem_root():
     if not MEM_ROOT:
         return None
     root = Path(MEM_ROOT)
-    if not (root / "scripts" / "mem.py").is_file():
+    if not (root / "scripts" / "mem.py").is_file() and not (root / "scripts" / "mem.js").is_file():
         return None
     return root
+
+
+def _mem_cmd(root: Path) -> tuple | None:
+    """这一轮用哪个执行器跑记忆 CLI（返回 None 表示配置坏了）。"""
+    if MEM_RUNNER == "node":
+        script = root / "scripts" / "mem.js"
+        if not script.is_file():
+            return None
+        return [MEM_NODE or "node", str(script)]
+    script = root / "scripts" / "mem.py"
+    if not script.is_file():
+        return None
+    return [MEM_PYTHON, str(script)]
 
 
 def _mem_run(args: list, timeout: int = 25) -> dict:
     root = _mem_root()
     if root is None:
         return {"ok": False, "error": "这一轮没有配记忆目录（设置页「记忆目录」留空）⇒ 记忆工具不可用"}
+    base = _mem_cmd(root)
+    if base is None:
+        return {"ok": False, "error": f"记忆执行器 {MEM_RUNNER} 找不到对应脚本（scripts/mem.py 或 scripts/mem.js）"}
     try:
         r = _sub.run(
-            [MEM_PYTHON, str(root / "scripts" / "mem.py"), *args],
+            [*base, *args],
             cwd=str(root), capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=timeout,
         )

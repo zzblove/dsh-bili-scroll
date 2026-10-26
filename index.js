@@ -32,7 +32,7 @@ import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey } from './lib/state.mjs'
 import { diagnoseRound } from './lib/diagnose.mjs'
 import { buildDutyPatch } from './lib/dutyprofile.mjs'
-import { MEM_TOOLS, memoryHealth, searchQueryOf, searchMemory, buildMemoBlock, clipText } from './lib/memory.mjs'
+import { MEM_TOOLS, memoryHealth, memoryTypes, searchQueryOf, searchMemory, buildMemoBlock, clipText } from './lib/memory.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { resolveUid } from './lib/uid.mjs'
 import { loadCred as dmCred, listSessions as dmList, fetchMsgs as dmFetch } from './lib/dm.mjs'
@@ -1111,7 +1111,7 @@ function reportMeta() {
       if (!q) { memoCache = { at: Date.now(), query: '', block: '', state: 'noquery' }; return { ...info, state: 'noquery' } }
       const fresh = memoCache.query === q && memoCache.block && (Date.now() - memoCache.at) < 10 * 60_000
       if (fresh) return { ...info, state: memoCache.state, cached: true }
-      const r = await searchMemory({ python: cfg.pythonPath || 'python', root: info.root, query: q, k: 5 })
+      const r = await searchMemory({ python: cfg.pythonPath || 'python', runner: info.runner, root: info.root, query: q, k: 5 })
       if (!r.ok) {
         log('记忆检索没跑成（不影响这一轮）：' + String(r.err || '').slice(0, 200))
         memoCache = { at: Date.now(), query: q, block: '', state: 'fail' }
@@ -1475,14 +1475,25 @@ function reportMeta() {
         '          - ' + yq(posix(script)),
         '        env:',
         '          BILI_MCP_TOOLS: ' + yq(mcpWhitelist().join(',')),
-        // ⭐ 长期记忆：把「记忆项目根目录」和「用哪个 python」交给 MCP 子进程
-        //   （它跑在沙箱外，`python scripts/mem.py …` 由它代劳；路径同样按 YAML 单引号规则转义）
-        ...(memoryInfo().ok
-          ? [
-            '          BILI_MEM_ROOT: ' + yq(posix(memoryInfo().root)),
+        // ⭐ 长期记忆：把「记忆项目根目录」「用哪种执行器（python / node）」「允许写的类型」交给 MCP 子进程
+        //   （它跑在沙箱外，检索 / 写入由它代劳；路径同样按 YAML 单引号规则转义）
+        ...(() => {
+          const m = memoryInfo()
+          if (!m.ok) return []
+          return [
+            '          BILI_MEM_ROOT: ' + yq(posix(m.root)),
+            '          BILI_MEM_RUNNER: ' + yq(String(m.runner?.kind || 'python')),
             '          BILI_MEM_PYTHON: ' + yq(posix(cfg.pythonPath || 'python')),
+            '          BILI_MEM_TYPES: ' + yq((m.types || []).join(',')),
+            // Node 版记忆（memory-kit）：桌面版里没有独立 node，用 Electron 本体 + 这个变量
+            ...(m.runner?.kind === 'node'
+              ? [
+                '          BILI_MEM_NODE: ' + yq(posix(process.execPath)),
+                '          ELECTRON_RUN_AS_NODE: ' + yq('1'),
+              ]
+              : []),
           ]
-          : []),
+        })(),
         '',
       )
     }

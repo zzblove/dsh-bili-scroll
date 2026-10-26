@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  MEM_TYPES, MEM_TOOLS, resolveMemoryRoot, searchQueryOf, clipText, buildMemoBlock,
+  MEM_TYPES, MEM_TOOLS, resolveMemoryRoot, memoryTypes, searchQueryOf, clipText, buildMemoBlock,
   searchArgs, showArgs, addArgs, runMem, addMemory, memoryHealth,
 } from '../lib/memory.mjs'
 
@@ -171,7 +171,61 @@ function fakeMemoryProject({ withMemPy = true, withMemory = true, indexLines = 2
   ok(/startswith\("memory\/"\)/.test(py), 'MCP 没限制 show 只能读 memory/ 下的条目')
   ok(py.includes('BILI_MEM_ROOT'), 'MCP 没读记忆根目录的环境变量')
   ok(MEM_TOOLS.length === 3 && MEM_TOOLS.every((t) => t.startsWith('bili_mem_')), 'MEM_TOOLS 名单不对')
-  ok(MEM_TYPES.join(',') === 'fact,decision,howto,correction', '记忆类型名单变了')
+  ok(MEM_TYPES.join(',') === 'fact,decision,howto,correction', '默认记忆类型名单变了')
+}
+
+// ⑨ Node 版记忆（memory-kit）：没有 mem.py 也能认出来，并按项目档案取类型
+{
+  const root = mk('bili-node-mem-')
+  mkdirSync(join(root, 'memory'), { recursive: true })
+  mkdirSync(join(root, 'scripts'), { recursive: true })
+  // 假的 mem.js：用 node 跑，把 argv 原样打出来（验的是"执行器选对了"）
+  writeFileSync(join(root, 'scripts', 'mem.js'), [
+    'const a = process.argv.slice(2)',
+    'process.stdout.write(JSON.stringify({ argv: a }) + "\\n")',
+    'process.exit(0)',
+  ].join('\n'), 'utf8')
+  const r1 = resolveMemoryRoot({ memoryDir: root })
+  ok(r1.ok && r1.runner && r1.runner.kind === 'node', '只有 mem.js 时没认出 Node 执行器：' + JSON.stringify(r1))
+
+  // 有 mem.py 时仍优先 Python（原实现）…
+  writeFileSync(join(root, 'scripts', 'mem.py'), 'print("x")\n', 'utf8')
+  const r2 = resolveMemoryRoot({ memoryDir: root })
+  ok(r2.runner && r2.runner.kind === 'python', '两种脚本都在时应优先 Python：' + JSON.stringify(r2.runner))
+
+  // …但如果项目档案不是 engineering，就必须用 Node（Python 版不认 bili 类型）
+  writeFileSync(join(root, 'memory', '.profile.json'), JSON.stringify({ profile: 'bili' }), 'utf8')
+  const r2b = resolveMemoryRoot({ memoryDir: root })
+  ok(r2b.runner && r2b.runner.kind === 'node', 'bili 档案时没切到 Node 执行器：' + JSON.stringify(r2b.runner))
+  rmSync(join(root, 'memory', '.profile.json'), { force: true })
+
+  // 档案：.profile.json 决定可写类型
+  writeFileSync(join(root, 'memory', '.profile.json'), JSON.stringify({ profile: 'bili' }), 'utf8')
+  ok(memoryTypes(root).join(',') === 'taste,video,talk,creator,correction', 'bili 档案的类型没读出来：' + memoryTypes(root).join(','))
+  rmSync(join(root, 'memory', '.profile.json'), { force: true })
+  ok(memoryTypes(root).join(',') === 'fact,decision,howto,correction', '没有档案文件时应退回工程类型')
+
+  // Node 执行器真的能跑（用 process.execPath，不需要 python）
+  writeFileSync(join(root, 'memory', '.profile.json'), JSON.stringify({ profile: 'bili' }), 'utf8')
+  const rr = await runMem({ python: 'definitely-missing-python', runner: { kind: 'node' }, root, args: ['search', 'hello'] })
+  ok(rr.ok && rr.out.includes('hello'), 'Node 执行器没跑通（不该依赖 python）：' + rr.err)
+
+  // 类型校验按档案来：bili 项目不许写 fact
+  const bad = await addMemory({ runner: { kind: 'node' }, root, type: 'fact', title: 't', summary: 's', body: 'b' })
+  ok(!bad.ok && /taste/.test(bad.err), 'bili 项目没拦住 fact 类型：' + JSON.stringify(bad))
+}
+
+// ⑩ 接线：执行器与类型都从宿主传到 MCP
+{
+  const idx = readFileSync(P + 'index.js', 'utf8')
+  const py = readFileSync(P + 'vendor/bilibili-mcp/mcp_server.py', 'utf8')
+  ok(idx.includes('memoryTypes'), 'index.js 没 import memoryTypes')
+  ok(idx.includes('BILI_MEM_RUNNER'), 'overlay 没下发执行器')
+  ok(idx.includes('BILI_MEM_TYPES'), 'overlay 没下发类型名单')
+  ok(idx.includes('BILI_MEM_NODE'), 'overlay 没给 Node 版传 node 路径')
+  ok(py.includes('def _mem_cmd'), 'MCP 没有执行器选择逻辑')
+  ok(py.includes('BILI_MEM_RUNNER'), 'MCP 没读执行器变量')
+  ok(py.includes('BILI_MEM_TYPES'), 'MCP 没读类型名单')
 }
 
 for (const d of tmpRoots) { try { rmSync(d, { recursive: true, force: true }) } catch { /* 清不掉也无所谓 */ } }

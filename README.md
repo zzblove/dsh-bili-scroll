@@ -124,6 +124,18 @@ dsh plugin --profile web add github:c1overzz/dsh-bili-scroll
 | **写** | MCP 子进程 | 模型用 `bili_mem_add` 写 1~2 条；走 `mem.py add`（带写锁 + 去重），写完自动 `reindex --local` |
 | **回看** | 模型 | 摘要只用于筛；引用数字 / 路径前用 `bili_mem_show(path, grep)` 回看原文 |
 
+**两种实现都认**：记忆目录里只要有 `scripts/mem.py`（Python 版，原实现）**或** `scripts/mem.js`
+（[memory-kit](https://github.com/zzblove/dsh-ops/tree/main/memory-kit)，纯 Node 版、免 Python）就能接；
+两个都在时优先 Python 版。**写哪些类型跟着项目档案走**（项目的 `memory/.profile.json`）：
+
+| 档案 | 类型 → 目录 | 适合 |
+|---|---|---|
+| `engineering`（默认） | `fact→facts` · `decision→decisions` · `howto→howto` | 工程仓库 |
+| `bili`（刷视频+聊天） | `taste→taste` · `video→videos` · `talk→talks` · `creator→creators` | 记口味、视频结论、聊过的共识、UP 主 |
+
+`correction` 两套档案都收，落在**被更正条目所在的目录**。用 memory-kit 铺记忆目录时：
+`node memory-kit/scripts/mem.js init D:\bili-memory --profile bili`。
+
 **怎么开**：设置页「偏好 → 长期记忆目录」填那个记忆项目的根目录（如 `D:\my-memory`），保存即可；
 留空 = 完全不用记忆（默认）。**不填时**会退到「工作区」——工作区恰好是记忆项目的话可以直接用。
 

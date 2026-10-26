@@ -1,3 +1,26 @@
+## 2.3.1 — 2026-10-26
+
+**记忆库支持「分类档案」，并兼容纯 Node 的实现（memory-kit）。**
+
+- **两种执行器**：有 `scripts/mem.py` 就用 Python 版（原实现），只有 `scripts/mem.js` 就用 Node 版
+  （memory-kit，免 Python）。桌面版没有独立 node，所以走 `BILI_MEM_NODE` + `ELECTRON_RUN_AS_NODE=1`。
+- **类型跟着项目走**：写入类型不再写死 `fact/decision/howto/correction`，而是读项目的
+  `memory/.profile.json` —— `bili` 档案用 `taste / video / talk / creator`（口味、视频结论、聊过的共识、UP 主），
+  `correction` 落在被更正条目旁边。类型名单通过 `BILI_MEM_TYPES` 下发给 MCP，工具那头也按它校验。
+- **章程**同步换成刷视频场景的说法（不再让人写"技术决策/操作步骤"这种工程词）。
+- 设置页「记忆目录」状态行会显示执行器（python / node）与可用类型。
+
+**升级**
+
+```sh
+dsh plugin --profile web add dsh-bili-scroll
+```
+
+升级后**重启一次 dsh**。`node tools/test-memory.mjs`（72 条断言）覆盖两种执行器、档案类型、
+以及"bili 项目不许写 fact"这类负向用例。
+
+---
+
 ## 2.3.0 — 2026-10-26
 
 **接上了「长期记忆」：可以直连你自己的 `markdown-project-memory`（`scripts/mem.py` + `memory/`）。**
