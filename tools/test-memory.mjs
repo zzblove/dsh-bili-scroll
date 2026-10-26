@@ -310,6 +310,23 @@ function fakeMemoryProject({ withMemPy = true, withMemory = true, indexLines = 2
   ok(cli.includes("type: 'password'"), 'key 输入框不是 password 类型（会明文显示）')
 }
 
+// ⑬ 可信度（stated / inferred）：工具、章程、规范都要跟得上
+{
+  const py = readFileSync(P + 'vendor/bilibili-mcp/mcp_server.py', 'utf8')
+  const duty = readFileSync(P + 'prompts/duty.md', 'utf8')
+  ok(/def bili_mem_add\([^)]*confidence/.test(py), 'MCP bili_mem_add 没有 confidence 参数')
+  ok(py.includes('confidence 只能是 stated / inferred'), 'MCP 没校验 confidence 取值')
+  ok(/if MEM_RUNNER == "node":\s*\n\s*args \+= \["--confidence", conf\]/.test(py), '--confidence 只应传给 Node 版（Python 版会报错）')
+  ok(duty.includes('推断不是事实'), '章程没写「推断不是事实」')
+  ok(duty.includes('没检索到就不许说'), '章程没写「没检索到不许说记得」')
+  ok(duty.includes('不许虚构共同经历'), '章程没写「不许虚构共同经历」')
+  ok(duty.includes('confidence'), '章程没提 confidence 参数')
+  // 负面清单（借鉴"机械化行为"那套，改成适合刷B站的六条）
+  for (const t of ['无条件的夸奖', '严肃/技术话题里卖萌', '为了显得亲近而编故事', '把闲聊变成任务清单', '同一个口癖', '硬下结论']) {
+    ok(duty.includes(t), '章程负面清单缺：' + t)
+  }
+}
+
 for (const d of tmpRoots) { try { rmSync(d, { recursive: true, force: true }) } catch { /* 清不掉也无所谓 */ } }
 
 if (fail.length) {

@@ -1519,7 +1519,8 @@ def bili_mem_show(path: str, grep: str = "", lines: str = "") -> str:
 
 
 @tool()
-def bili_mem_add(type: str, title: str, summary: str, body: str, scope: str = "", source: str = "") -> str:
+def bili_mem_add(type: str, title: str, summary: str, body: str, scope: str = "", source: str = "",
+                 confidence: str = "stated") -> str:
     """
     把一条**值得跨天保留**的观察写进长期记忆（带写锁 + 去重 + 索引更新）。
 
@@ -1532,6 +1533,8 @@ def bili_mem_add(type: str, title: str, summary: str, body: str, scope: str = ""
         body: 正文（≤4000 字）：结论、依据；**不要写密钥、临时调试信息、代码里直接可见的内容**
         scope: 适用范围（可选，如 bilibili）
         source: 依据（可选，如看到的视频 BV 号 / 日志路径）
+        confidence: `stated`（默认）= 使用者**明确说过**；`inferred` = **你自己推断的**。
+                    推断出来的条目以后会被标出来，引用时必须说"我猜"，不能当成他说的 ✗
 
     Returns:
         写到了哪个文件 / 是否命中已有条目（去重）
@@ -1539,6 +1542,9 @@ def bili_mem_add(type: str, title: str, summary: str, body: str, scope: str = ""
     t = str(type or "").strip().lower()
     if t not in MEM_TYPES:
         return json.dumps({"ok": False, "error": "type 只能是 " + " / ".join(MEM_TYPES)}, ensure_ascii=False)
+    conf = str(confidence or "stated").strip().lower()
+    if conf not in ("stated", "inferred"):
+        return json.dumps({"ok": False, "error": "confidence 只能是 stated / inferred"}, ensure_ascii=False)
     ti = " ".join(str(title or "").split())[:80]
     sm = " ".join(str(summary or "").split())[:200]
     bd = str(body or "").replace("\r\n", "\n").strip()[:4000]
@@ -1557,6 +1563,9 @@ def bili_mem_add(type: str, title: str, summary: str, body: str, scope: str = ""
             args += ["--scope", str(scope).strip()[:60]]
         if str(source or "").strip():
             args += ["--source", str(source).strip()[:200]]
+        # ⚠️ `--confidence` 只有 Node 版（memory-kit ≥1.3）认；Python 版收到未知参数会直接报错
+        if MEM_RUNNER == "node":
+            args += ["--confidence", conf]
         r = _mem_run(args, timeout=30)
         if not r.get("ok"):
             return json.dumps({"ok": False, "error": r.get("err") or r.get("error") or "add 失败", "code": r.get("code")}, ensure_ascii=False)
