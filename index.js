@@ -31,6 +31,7 @@ import { McpClient } from './lib/mcp.mjs'
 import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey } from './lib/state.mjs'
 import { diagnoseRound } from './lib/diagnose.mjs'
+import { buildDutyPatch } from './lib/dutyprofile.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { resolveUid } from './lib/uid.mjs'
 import { loadCred as dmCred, listSessions as dmList, fetchMsgs as dmFetch } from './lib/dm.mjs'
@@ -1290,6 +1291,53 @@ function reportMeta() {
   //    · 铺不上就明确退回 headless，并在日志里说清"这一轮不是最小权限"（失败要出声）
   let dutyProfileState = 'unknown'   // ok / missing / failed
   const dutyProfileDir = join(dirname(stateDir), 'profiles', 'bili-duty')
+  const dutyPatchFile = join(dutyProfileDir, 'cordis.patch.yml')
+
+  /* ⭐⭐ issue #125 / #130（桌面版实测两次）：最小权限 profile 只开了
+   *    `credentials` / `authorization` / `deepseek-account` —— 宿主里那些**自定义 provider**
+   *    （`llm-pi-ai` 的 `providers:`、`llm-deepseek` 的 `baseURL:` + `models:`）在这一层没注册。
+   *    而 overlay 会把「宿主当前选的模型」写进 `agent-default-model`（2.0.x 为修 MISSING_CREDENTIAL 加的）
+   *    ⇒ 该 provider 在值班这棵树里查不到 ⇒ headless 还没发请求就 `NO_ADAPTER` 秒退（exit 1）。
+   *    ⇒ 铺完模板后，把宿主 patch 里「注册线路」的条目原样抄进值班 profile 的 patch。
+   *      只认线路声明才有的键（providers / models / baseURL / apiKeyEnv…），UI / 权限 / 沙箱 / MCP 一概不碰。 */
+  const dshHomeDir = dirname(stateDir)
+  const hostPatchFile = ownProfileName
+    ? join(dshHomeDir, 'profiles', String(process.env.DSH_HOST_PROFILE || ownProfileName), 'cordis.patch.yml')
+    : ''
+  let dutyRouteProviders = new Set(['deepseek-account', 'deepseek-official', 'deepseek'])
+  let dutyRouteSynced = false         // true ⇒ 静态已确认"值班这棵树里有哪些 provider"，可以据此决定写不写 agent-default-model
+  const syncDutyProviders = () => {
+    dutyRouteSynced = false
+    if (process.env.BILI_NO_PROVIDER_SYNC === '1') {
+      log('⏭ 按 BILI_NO_PROVIDER_SYNC=1 跳过「宿主线路同步」（自定义 provider 可能 NO_ADAPTER）')
+      return
+    }
+    if (!hostPatchFile) {
+      log('⚠️ 没识别出自己装在哪个 profile 下 ⇒ 不抄宿主模型线路（自定义 provider 可能 NO_ADAPTER）')
+      return
+    }
+    if (!existsSync(hostPatchFile)) {
+      log('⚠️ 宿主 profile 的 patch 不存在：' + hostPatchFile + ' ⇒ 不抄模型线路')
+      return
+    }
+    try {
+      const tpl = readFileSync(dutyPatchFile, 'utf8')
+      const r = buildDutyPatch(tpl, readFileSync(hostPatchFile, 'utf8'), { hostProfile: ownProfileName || '宿主' })
+      dutyRouteProviders = r.providers
+      if (!r.copied.length) {
+        dutyRouteSynced = true
+        log('宿主 profile（' + (ownProfileName || '?') + '）里没有额外的模型线路 ⇒ 值班 profile 保持模板原样')
+        return
+      }
+      writeFileSync(dutyPatchFile, r.text, 'utf8')
+      dutyRouteSynced = true
+      log('已把宿主 profile（' + (ownProfileName || '?') + '）的模型线路同步进值班 profile：' + r.copied.join('、')
+        + (r.providersFromHost.size ? '（provider：' + [...r.providersFromHost].join('、') + '）' : ''))
+    } catch (e) {
+      log('⚠️ 同步宿主模型线路失败（自定义 provider 这一轮可能 NO_ADAPTER）：' + String(e?.message ?? e))
+    }
+  }
+
   const ensureDutyProfile = () => {
     try {
       const src = join(pluginDir, 'profile-template', 'bili-duty')
@@ -1297,7 +1345,9 @@ function reportMeta() {
       mkdirSync(dirname(dutyProfileDir), { recursive: true })
       // 每次启动都覆盖（模板很小；这是安全边界，用户改它也会被覆盖）
       cpSync(src, dutyProfileDir, { recursive: true, force: true })
-      dutyProfileState = existsSync(join(dutyProfileDir, 'cordis.patch.yml')) ? 'ok' : 'failed'
+      dutyProfileState = existsSync(dutyPatchFile) ? 'ok' : 'failed'
+      // ⭐ 铺成之后立刻同步宿主线路（模板每次都是干净的 ⇒ 这里不会重复追加）
+      if (dutyProfileState === 'ok') syncDutyProviders()
       return dutyProfileState === 'ok'
     } catch (e) {
       dutyProfileState = 'failed'
@@ -1341,14 +1391,25 @@ function reportMeta() {
       const selProvider = sel?.provider ?? sel?.providerId
       const selModel = sel?.model ?? sel?.modelId
       if (selProvider && selModel) {
-        yml.push(
-          '- id: agent-default-model',
-          '  config:',
-          '    provider: ' + String(selProvider),
-          '    model: ' + String(selModel),
-          ...(sel.reasoningEffort ? ['    reasoningEffort: ' + String(sel.reasoningEffort)] : []),
-          '',
-        )
+        // ⭐ issue #125 / #130：只有**确认这个 provider 在值班这棵树里有注册**才写。
+        //    写一个没注册的 provider ⇒ headless 还没发请求就 `NO_ADAPTER` 秒退（1 秒、code=1）✗
+        //    抄不到线路时（dutyRouteSynced=false）保持老行为：不改动别人已经能跑的现场 ✓
+        const prov = String(selProvider)
+        const guardOn = dutyRouteSynced && effectiveProfile() === 'bili-duty'
+        if (guardOn && !dutyRouteProviders.has(prov)) {
+          log('⚠️ 宿主选的模型线路「' + prov + '」在值班 profile（bili-duty）里没有注册 ⇒ 这一轮不写'
+            + ' agent-default-model，改用 profile 默认模型（避免 NO_ADAPTER 秒退）。'
+            + '修法：把这条线路的条目加进 ' + dutyPatchFile + '，或把宿主模型换回官方线路。')
+        } else {
+          yml.push(
+            '- id: agent-default-model',
+            '  config:',
+            '    provider: ' + prov,
+            '    model: ' + String(selModel),
+            ...(sel.reasoningEffort ? ['    reasoningEffort: ' + String(sel.reasoningEffort)] : []),
+            '',
+          )
+        }
       }
     } catch { /* 老版本没有这个服务 —— 不写就退回原行为 */ }
     if (cfg.overlayMcp) {

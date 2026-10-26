@@ -64,7 +64,7 @@ dsh plugin --profile web add github:c1overzz/dsh-bili-scroll
 
 ⚠️ 装完**必须重启一次 dsh**（bundle 层要重启才组装）。然后进 **设置 → 刷B站**。
 
-## 装不上 / 卡住时，先看这五条（都是用户实测撞过的）
+## 装不上 / 卡住时，先看这六条（都是用户实测撞过的）
 
 1. **桌面版（DSH NEXT / 0.2.x）上"自动跑"会卡住** —— 有用户反馈：它起那一轮用的是
    `dsh --profile headless …`，桌面版上容易卡在那儿。⇒ **先用设置页的「现在跑一轮」手动跑**（那条是稳的）；
@@ -81,6 +81,15 @@ dsh plugin --profile web add github:c1overzz/dsh-bili-scroll
    **0.1.4 起已修**（不再裸 import 那两个包）。⇒ 升级一次就好：`dsh plugin --profile desktop add dsh-bili-scroll`。
    ⚠️ 我们自己也只在 **npm 0.1.7-rc.x + web profile** 上实测过；桌面版这条路靠用户反馈修好的 ——
    装完还是不行的话，把 `duty.log` 里那几行发来（里面会写清楚"宿主依赖是从哪儿取的"）。
+6. ⭐ **配了第三方中转 / 自定义模型线路，点「现在跑一轮」1 秒就结束，日志里
+   `NO_ADAPTER: no adapter registered for provider "xxx"`** ——
+   值班轮跑在最小权限 profile（`bili-duty`，无文件系统 / 无命令 / 无联网）上，而你那条线路的定义
+   （`llm-pi-ai` 的 `providers:`、`llm-deepseek` 的 `baseURL:` + `models:`）是写在**宿主 profile** 里的。
+   **2.2.2 起插件每次启动都会把宿主 profile 里"声明模型线路"的条目抄进值班 profile**，这条一般不会再出现；
+   还报就说明自动同步没认出那条线路（或者扫不到条目）⇒ 把宿主 `profiles/<你的 profile>/cordis.patch.yml`
+   里声明 `providers:` / `models:` / `baseURL:` 的条目补进插件包的 `profile-template/bili-duty/cordis.patch.yml`。
+   ⚠️ 别改 `~/.dsh/profiles/bili-duty/cordis.patch.yml`：它每次启动都被模板覆盖。
+   想临时关掉自动同步：环境变量 `BILI_NO_PROVIDER_SYNC=1`。
 
 ## 首次使用（两步）
 

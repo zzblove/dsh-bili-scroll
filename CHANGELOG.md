@@ -1,3 +1,36 @@
+## 2.2.2 — 2026-10-25
+
+**值班轮能直接用宿主里的自定义 provider（修 #125 / #130 那个「1 秒 `NO_ADAPTER` 秒退」）。**
+
+**根因**：2.1.0 起的「最小权限 profile」只开了 `credentials` / `authorization` / `deepseek-account`，
+宿主里那些自定义线路（`llm-pi-ai` 的 `providers:`、`llm-deepseek` 的 `baseURL:` + `models:`）
+在这一层**没有注册**；而 overlay 会把「宿主当前选的模型」写进 `agent-default-model`
+⇒ 那个 provider 查不到 ⇒ headless **还没发请求就 `NO_ADAPTER` 退出**（1 秒、code=1，报告只有占位稿）。
+用户自己还救不回来：值班 profile 每次启动都被模板 `cpSync` 覆盖。
+
+**现在**：
+
+- 每次启动铺完模板后，把宿主 profile `cordis.patch.yml` 里**声明模型线路**的条目原样抄进值班 profile ——
+  只认线路才有的键（`providers:` / `models:` / `baseURL:` / `apiKeyEnv:` / `api:`），
+  UI、权限、沙箱、MCP（包括带 token 的 `insert:`）一概不碰，`agent-default-model` 不抄（由 overlay 决定）。
+- 写 `agent-default-model` 之前先确认这个 provider 在值班那一层**有注册**；不在就**不写**并记一行日志，
+  这一轮退回 profile 默认模型 —— 宁可降级跑，也不要 1 秒秒退 + 一句看不懂的 `NO_ADAPTER`。
+- `lib/diagnose.mjs` 的 `NO_ADAPTER` 排查建议同步改掉（原来让人去改 `~/.dsh/profiles/bili-duty/`，
+  那个文件每次启动都会被覆盖，照做没用）。
+- 想关掉自动同步：环境变量 `BILI_NO_PROVIDER_SYNC=1`。
+- 新增 `node tools/test-duty-profile.mjs`（47 条断言：顶层条目切分 / provider 名解析 / 该抄谁 /
+  幂等 / CRLF / `insert` 里的第三方 provider / 接线）。
+
+**安装 / 升级**
+
+```sh
+dsh plugin --profile web add dsh-bili-scroll
+```
+
+升级后**重启一次 dsh**（重启时才会重新铺值班 profile 并同步线路）。
+
+---
+
 ## 2.2.1 — 2026-10-25
 
 **修两个会真咬人的地方（都是用户实测报上来的）。**
