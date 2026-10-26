@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import {
   MEM_TYPES, MEM_TOOLS, resolveMemoryRoot, memoryTypes, searchQueryOf, clipText, buildMemoBlock,
   searchArgs, showArgs, addArgs, runMem, addMemory, memoryHealth,
-  keyState, writeKey, testSemantic, buildVectorsNow,
+  keyState, writeKey, testSemantic, buildVectorsNow, cliInfo, semanticReady,
 } from '../lib/memory.mjs'
 
 const P = join(dirname(fileURLToPath(import.meta.url)), '..') + '/'
@@ -260,9 +260,11 @@ function fakeMemoryProject({ withMemPy = true, withMemory = true, indexLines = 2
   mkdirSync(join(root, 'memory'), { recursive: true })
   mkdirSync(join(root, 'scripts'), { recursive: true })
   writeFileSync(join(root, 'scripts', 'mem.js'), [
-    'process.stdout.write("[1] fake\\n[2] fake2\\n")',
+    "export const VERSION = '1.2.0'",
+    "process.stdout.write('[1] fake\\n[2] fake2\\n')",
     'process.exit(0)',
   ].join('\n'), 'utf8')
+  writeFileSync(join(root, 'scripts', 'semantic.mjs'), 'export const ok = true\n', 'utf8')
 
   // 用一个空的 MEMORY_HOME，隔离本机真实的 ~/.mem_api_key
   const noHome = mk('nohome-')
@@ -279,6 +281,21 @@ function fakeMemoryProject({ withMemPy = true, withMemory = true, indexLines = 2
 
   const t = await testSemantic({ runner: { kind: 'node' }, root, timeoutMs: 8000 })
   ok(t.ok && t.hits === 2 && Number.isFinite(t.ms), '自检没解析出命中条数：' + JSON.stringify(t).slice(0, 160))
+
+  // ⭐ 版本守卫：项目里那份 CLI 旧了 / 缺 semantic.mjs 时，自检必须**明说**而不是静默退回关键词
+  const old = mk('bili-oldcli-')
+  mkdirSync(join(old, 'memory'), { recursive: true })
+  mkdirSync(join(old, 'scripts'), { recursive: true })
+  writeFileSync(join(old, 'scripts', 'mem.js'), "export const VERSION = '1.1.0'\nprocess.stdout.write('[1] keyword\\n')\n", 'utf8')
+  const tOld = await testSemantic({ runner: { kind: 'node' }, root: old, timeoutMs: 8000 })
+  ok(!tOld.ok && /1\.2\.0/.test(String(tOld.err)), '旧版 CLI 没被版本守卫拦住：' + JSON.stringify(tOld).slice(0, 200))
+  writeFileSync(join(old, 'scripts', 'mem.js'), "export const VERSION = '1.2.0'\nprocess.stdout.write('[1] x\\n')\n", 'utf8')
+  const tNoMod = await testSemantic({ runner: { kind: 'node' }, root: old, timeoutMs: 8000 })
+  ok(!tNoMod.ok && /semantic\.mjs/.test(String(tNoMod.err)), '缺 semantic.mjs 没被拦住：' + JSON.stringify(tNoMod).slice(0, 200))
+  ok(cliInfo(old, { kind: 'node' }).version === '1.2.0', 'cliInfo 没读出 CLI 版本')
+  ok(!semanticReady(old, { kind: 'node' }).ok, 'semanticReady 对缺模块的目录应判 false')
+  ok(semanticReady(root, { kind: 'node' }).ok, 'semanticReady 对健康目录应判 true')
+  ok(semanticReady(old, { kind: 'python' }).ok, 'Python 版应始终视为支持语义')
 
   const v = await buildVectorsNow({ runner: { kind: 'node' }, root, timeoutMs: 8000 })
   ok(v.ok && Number.isFinite(v.ms), '建向量调用没跑通：' + JSON.stringify(v).slice(0, 160))

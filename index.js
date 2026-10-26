@@ -32,7 +32,7 @@ import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey } from './lib/state.mjs'
 import { diagnoseRound } from './lib/diagnose.mjs'
 import { buildDutyPatch } from './lib/dutyprofile.mjs'
-import { MEM_TOOLS, memoryHealth, memoryTypes, searchQueryOf, searchMemory, buildMemoBlock, clipText, keyState, writeKey, testSemantic, buildVectorsNow } from './lib/memory.mjs'
+import { MEM_TOOLS, memoryHealth, memoryTypes, searchQueryOf, searchMemory, buildMemoBlock, clipText, keyState, writeKey, testSemantic, buildVectorsNow, semanticReady } from './lib/memory.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { resolveUid } from './lib/uid.mjs'
 import { loadCred as dmCred, listSessions as dmList, fetchMsgs as dmFetch } from './lib/dm.mjs'
@@ -1121,7 +1121,17 @@ function reportMeta() {
       if (!q) { memoCache = { at: Date.now(), query: '', block: '', state: 'noquery' }; return { ...info, state: 'noquery' } }
       const fresh = memoCache.query === q && memoCache.block && (Date.now() - memoCache.at) < 10 * 60_000
       if (fresh) return { ...info, state: memoCache.state, cached: true }
-      const r = await searchMemory({ python: cfg.pythonPath || 'python', runner: info.runner, root: info.root, query: q, k: 5, semantic: Boolean(cfg.memorySemantic) })
+      // ⭐ 2.5.1：开了语义检索、但项目里那份 CLI 太旧 / 缺 semantic.mjs ⇒ 明说并退回关键词
+      //    （旧 CLI 会**静默**忽略 --semantic，看起来像"开了没用"）
+      let semantic = Boolean(cfg.memorySemantic)
+      if (semantic) {
+        const ready = semanticReady(info.root, info.runner)
+        if (!ready.ok) {
+          semantic = false
+          log('⚠️ 语义检索没生效：' + ready.reason)
+        }
+      }
+      const r = await searchMemory({ python: cfg.pythonPath || 'python', runner: info.runner, root: info.root, query: q, k: 5, semantic })
       if (!r.ok) {
         log('记忆检索没跑成（不影响这一轮）：' + String(r.err || '').slice(0, 200))
         memoCache = { at: Date.now(), query: q, block: '', state: 'fail' }

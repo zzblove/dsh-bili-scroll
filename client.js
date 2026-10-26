@@ -547,9 +547,12 @@ function WatchTab() {
         try {
           const r = await jpost('/memory/test', {})
           if (r?.ok) {
-            setMemTest(`✓ 通 · ${r.ms}ms · 命中 ${r.hits} 条`
-              + (r.semanticUsed ? '（走了语义检索）' : '（这次没走语义：可能是没 key、或本地关键词已命中）'))
-          } else setMemTest('✗ 失败：' + (r?.error || r?.err || '未知原因'))
+            // ⭐ 2.5.1：没走语义时把 CLI 说的原因带出来（没 key / 服务商报错 / 脚本太旧）
+            const why = r.semanticUsed
+              ? '（走了语义检索）'
+              : (r.fallback ? '（退回关键词：' + r.fallback + '）' : '（本地关键词已命中，没调 API）')
+            setMemTest(`✓ 通 · ${r.ms}ms · 命中 ${r.hits} 条` + why)
+          } else setMemTest('✗ 失败：' + (r?.err || r?.error || '未知原因'))
         } catch (e) { setMemTest('✗ 失败：' + String(e?.message ?? e)) } finally { setMemBusy('') }
       }
 
@@ -766,7 +769,8 @@ function WatchTab() {
             + (st.memory.state === 'ok' ? ' · 上次按「' + (st.memory.query || '') + '」检索到并注入了 ' + (st.memory.chars || 0) + ' 字' : '')
             + (st.memory.state === 'empty' ? ' · 上次检索没有命中（不算错）' : '')
             + (st.memory.state === 'noquery' ? ' · 没填关键词，所以这一轮没检索' : '')
-            + (st.memory.state === 'fail' ? ' · 上次检索失败，看 duty.log' : '')) : null,
+            + (st.memory.state === 'fail' ? ' · 上次检索失败，看 duty.log' : '')
+            + (st.memory.cli && st.memory.cli.version ? ' · 记忆 CLI v' + st.memory.cli.version : '')) : null,
           // ⭐ 语义检索（嵌入 + 重排）：默认关，纯本地关键词不花钱
           h(ToggleRow, {
             label: '用嵌入 + 重排做语义检索',
