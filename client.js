@@ -248,6 +248,10 @@ function WatchTab() {
       const [memBase, setMemBase] = React.useState(null)
       const [memEmbed, setMemEmbed] = React.useState(null)
       const [memRerank, setMemRerank] = React.useState(null)
+      // ⭐ 2.7.0：飞书日报
+      const [feishuUrl, setFeishuUrl] = React.useState(null)
+      const [feishuBusy, setFeishuBusy] = React.useState(false)
+      const [feishuMsg, setFeishuMsg] = React.useState('')
       const [rl, setRl] = React.useState(null)
       const [newVer, setNewVer] = React.useState('')       // 发现的新版本号（空 = 没发现）          // 日报形态：full / brief / off
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
@@ -290,6 +294,7 @@ function WatchTab() {
         if (cfg && memBase === null) setMemBase(cfg.memoryBaseUrl || '')
         if (cfg && memEmbed === null) setMemEmbed(cfg.memoryEmbedModel || '')
         if (cfg && memRerank === null) setMemRerank(cfg.memoryRerankModel || '')
+        if (cfg && feishuUrl === null) setFeishuUrl(cfg.feishuWebhook || '')
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
@@ -565,6 +570,16 @@ function WatchTab() {
         } catch (e) { setMemTest('✗ 建向量失败：' + String(e?.message ?? e)) } finally { setMemBusy('') }
       }
 
+      const testFeishu = async () => {
+        setFeishuBusy(true)
+        setFeishuMsg('正在发…')
+        try {
+          const r = await jpost('/feishu/test', {})
+          if (r?.ok) setFeishuMsg(`✓ 已发送（带了今天日报的前 ${Math.min(3, r.picks || 0)} 条）—— 去飞书群里看一眼`)
+          else setFeishuMsg('✗ 失败：' + (r?.error || r?.err || ('code ' + (r?.code ?? '?'))))
+        } catch (e) { setFeishuMsg('✗ 失败：' + String(e?.message ?? e)) } finally { setFeishuBusy(false) }
+      }
+
       const onSaveText = async () => {
         const list = String(kws || '').split('\n').map((s) => s.trim()).filter(Boolean)
         await patch({ keywords: list, personaPrompt: String(persona || '').trim(), memoryDir: String(memDir || '').trim() }, '关键词 / 人设 / 记忆目录')
@@ -835,6 +850,34 @@ function WatchTab() {
             on: Boolean(cfg.dmUsage),
             onChange: (v) => patch({ dmUsage: v }, '用量私信'),
           }),
+          // ⭐ 2.7.0：飞书日报推送（群自定义机器人 webhook，不需要建应用）
+          h('div', { 'data-bd-label': '' }, '飞书日报（每轮跑完推到群里）'),
+          h(ToggleRow, {
+            label: '开启飞书日报推送',
+            note: '飞书群 → 设置 → 群机器人 → 添加「自定义机器人」→ 复制 webhook 填到下面。'
+              + '只推送，不会让飞书里能聊天（那是另一条链路，要建飞书应用）。',
+            on: Boolean(cfg.feishuOn),
+            onChange: (v) => patch({ feishuOn: v }, '飞书日报'),
+          }),
+          h('input', {
+            'data-bd-input': '', placeholder: 'https://open.feishu.cn/open-apis/bot/v2/hook/…',
+            value: feishuUrl ?? '', onChange: (e) => setFeishuUrl(e.target.value),
+            onBlur: () => patch({ feishuWebhook: String(feishuUrl || '').trim() }, '飞书 webhook'),
+          }),
+          h('select', {
+            'data-bd-input': '', value: cfg.feishuDetail || 'full',
+            onChange: (e) => patch({ feishuDetail: e.target.value }, '飞书推送内容'),
+          },
+            h('option', { value: 'full' }, '完整 —— 标题 / UP / 链接 / 一句话理由'),
+            h('option', { value: 'links' }, '只发标题和链接（省地方）'),
+            h('option', { value: 'usage' }, '只发本轮 token 用量')),
+          h('div', { 'data-bd-row': '' },
+            h('button', { 'data-bd-btn': '', disabled: feishuBusy, onClick: testFeishu }, feishuBusy ? '发送中…' : '发一条测试'),
+            h('div', { 'data-bd-note': '' }, feishuMsg
+              || (st.feishu && st.feishu.last
+                ? (st.feishu.last.ok ? '上次推送：成功 · ' : '上次推送：失败 · ') + String(st.feishu.last.at || '').slice(0, 19).replace('T', ' ')
+                  + (st.feishu.last.ok ? '' : '（' + (st.feishu.last.error || '') + '）')
+                : '还没推送过'))),
           h('div', { 'data-bd-label': '' }, '日报写多细'),
           h('select', {
             'data-bd-input': '', value: rl ?? 'full',

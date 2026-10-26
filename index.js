@@ -34,6 +34,7 @@ import { diagnoseRound } from './lib/diagnose.mjs'
 import { buildDutyPatch } from './lib/dutyprofile.mjs'
 import { MEM_TOOLS, memoryHealth, memoryTypes, searchQueryOf, searchMemory, buildMemoBlock, clipText, keyState, writeKey, testSemantic, buildVectorsNow, semanticReady } from './lib/memory.mjs'
 import { findRoundSession, readUsage, formatUsage } from './lib/usage.mjs'
+import { isFeishuWebhook, parseReportPicks, sendReport } from './lib/feishu.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { resolveUid } from './lib/uid.mjs'
 import { loadCred as dmCred, listSessions as dmList, fetchMsgs as dmFetch } from './lib/dm.mjs'
@@ -100,6 +101,12 @@ export const Config = !z ? undefined : z.object({
   memoryRerankModel: z.string().default('').extra('volatile', true),
   /** ⭐ 2.6.0：每轮把「本轮 token 用量」私信发给主人（需要填「私信收件人 UID」） */
   dmUsage: z.boolean().default(true).extra('volatile', true),
+  /** ⭐ 2.7.0：每轮把日报推到飞书群（自定义机器人 webhook；只推送，不需要建应用） */
+  feishuOn: z.boolean().default(false).extra('volatile', true),
+  /** 飞书群机器人 webhook（https://open.feishu.cn/open-apis/bot/v2/hook/…） */
+  feishuWebhook: z.string().default('').extra('volatile', true),
+  /** 推什么：full=标题+UP+理由 · links=只标题和链接 · usage=只发用量 */
+  feishuDetail: z.string().default('full').extra('volatile', true),
   /** 私信监听：只认主人本人发来的私信，有新消息就回一句 · 2.0 起默认开（查私信不花 token，只有真有人发消息才回一句） */
   dmWatch: z.boolean().default(true).extra('volatile', true),
   /** 私信监听间隔（分钟，最小 3） */
@@ -255,7 +262,7 @@ function reportMeta() {
     personaPrompt: '',
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'only', dmUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', memoryDir: '', memorySemantic: false, memoryBaseUrl: '', memoryEmbedModel: '', memoryRerankModel: '', dmUsage: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
+    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', memoryDir: '', memorySemantic: false, memoryBaseUrl: '', memoryEmbedModel: '', memoryRerankModel: '', dmUsage: true, feishuOn: false, feishuWebhook: '', feishuDetail: 'full', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -302,6 +309,9 @@ function reportMeta() {
     }
     if ('memorySemantic' in p) p.memorySemantic = Boolean(p.memorySemantic)
     if ('dmUsage' in p) p.dmUsage = Boolean(p.dmUsage)
+    if ('feishuOn' in p) p.feishuOn = Boolean(p.feishuOn)
+    if ('feishuWebhook' in p) p.feishuWebhook = String(p.feishuWebhook || '').trim().slice(0, 500)
+    if ('feishuDetail' in p) p.feishuDetail = ['full', 'links', 'usage'].includes(String(p.feishuDetail)) ? String(p.feishuDetail) : 'full'
     for (const k of ['memoryBaseUrl', 'memoryEmbedModel', 'memoryRerankModel']) {
       if (k in p) p[k] = String(p[k] || '').trim().slice(0, 300)
     }
@@ -920,6 +930,35 @@ function reportMeta() {
       lastLine: formatUsage(j.last).line,
       today: todays.length ? { rounds: todays.length, input: sum('input'), output: sum('output'), total: sum('total'), cacheRead: sum('cacheRead') } : null,
     }
+  }
+
+  /* ⭐ 2.7.0：把当天日报推到飞书群（卡片由宿主拼，失败只记日志、绝不抛）
+   *    只做**推送**：自定义机器人 webhook，不需要建飞书应用。
+   *    "在飞书里聊天"是另一条链路，走应用凭证，见 fly 计划。 */
+  const pushFeishuReport = async (day, usage) => {
+    try {
+      if (!cfg.feishuOn) return null
+      const url = String(cfg.feishuWebhook || '').trim()
+      if (!isFeishuWebhook(url)) { log('飞书日报：webhook 没填或不是飞书的地址 ⇒ 跳过'); return null }
+      let picks = []
+      try { picks = parseReportPicks(readFileSync(join(outDir, day + '.md'), 'utf8')) } catch { /* 没有报告就发空卡片 */ }
+      const r = await sendReport({ url, day, picks, usage, detail: cfg.feishuDetail })
+      try {
+        const st = readJson(dutyStateFile, {})
+        writeJson(dutyStateFile, { ...st, feishu: { at: new Date().toISOString(), ok: r.ok, error: String(r.err || '').slice(0, 200) } })
+      } catch { /* 记不上状态不影响推送 */ }
+      log(r.ok ? `飞书日报已发（${picks.length} 条）` : `飞书日报没发出去：${r.err}`)
+      return r
+    } catch (e) {
+      log('飞书日报出错（已兜住）：' + String(e?.message ?? e).slice(0, 160))
+      return null
+    }
+  }
+  const feishuStatus = () => {
+    try {
+      const st = readJson(dutyStateFile, {})
+      return { on: Boolean(cfg.feishuOn), hasWebhook: isFeishuWebhook(cfg.feishuWebhook), detail: cfg.feishuDetail, last: st.feishu || null }
+    } catch { return { on: Boolean(cfg.feishuOn), hasWebhook: false, detail: cfg.feishuDetail, last: null } }
   }
 
   /* ⭐ 「定量刷」承诺的是**每天挑几条**（2026-10-16 审查修 H1：原来 st.count 从没自增过，
@@ -1791,7 +1830,10 @@ function reportMeta() {
       log(`刷B站结束（${why}，code=${code}）`)
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
       // ⭐ 2.6.0：等会话落盘后把这一轮的 token 账记下来（异步、不影响收尾；读不到就"未知"）
-      Promise.resolve(collectRoundUsage(dutyStartedAt || Date.now(), why, code)).catch(() => {})
+      // ⭐ 2.7.0：记完用量顺手把日报推到飞书（用量数据也一起带进卡片）
+      Promise.resolve(collectRoundUsage(dutyStartedAt || Date.now(), why, code))
+        .then((u) => pushFeishuReport(dayKey(), u))
+        .catch(() => {})
     // ⭐ 2026-10-20：这一轮跑成了、并且使用者选了收藏夹 ⇒ 把挑中的存进去（后台做，别拖住收尾）
     if (code === 0 && Number(cfg.favFolderId) > 0) {
       favToday('auto').catch((error) => log('自动收藏出错（已兜住）：' + String(error?.message ?? error)))
@@ -2677,6 +2719,8 @@ function reportMeta() {
       })(),
       // ⭐ 2.6.0：最近一轮 / 今天累计的 token 用量（从 DSH 会话投影里读的真数）
       usage: (() => { try { return usageSummary() } catch { return { last: null, lastLine: '', today: null } } })(),
+      // ⭐ 2.7.0：飞书日报推送状态（开着没开、地址像不像飞书的、上次成没成）
+      feishu: (() => { try { return feishuStatus() } catch { return { on: false, hasWebhook: false, detail: 'full', last: null } } })(),
       venvReady: venvReadyNow(),
       version: myVersion(),
       // 2026-10-22：缺哪个 Python 包装不上，得能一眼看出来（出不了二维码 =09 缺 qrcode）
@@ -2850,6 +2894,21 @@ function reportMeta() {
     // ⭐ 「复核评论」：拿判重表里最近的记录，去 B站 核一遍到底公开可见没有
     //    （设置页那个按钮、以及每轮结束 90 秒后自动跑一次，都走这里）
     if (req.method === 'POST' && path === '/api/bili-duty/verify') return sendJson(res, 200, await runVerify('manual'))
+
+    // 「发一条测试」：用今天日报里前 3 条拼一张卡真发一次（不写状态，专供验证地址）
+    if (req.method === 'POST' && path === '/api/bili-duty/feishu/test') {
+      const url = String(cfg.feishuWebhook || '').trim()
+      if (!isFeishuWebhook(url)) {
+        return sendJson(res, 200, { ok: false, error: '先填飞书群机器人的 webhook（https://open.feishu.cn/open-apis/bot/v2/hook/…）' })
+      }
+      let picks = []
+      try { picks = parseReportPicks(readFileSync(join(outDir, dayKey() + '.md'), 'utf8')) } catch { /* 没有今天的报告就发空卡 */ }
+      let usage = null
+      try { usage = readJson(usageFile, {}).last || null } catch { /* 没有用量就不带 */ }
+      const r = await sendReport({ url, day: dayKey(), picks: picks.slice(0, 3), usage, detail: cfg.feishuDetail })
+      log('飞书测试：' + (r.ok ? '已发送' : '失败 ' + (r.err || r.code)))
+      return sendJson(res, 200, { ...r, picks: picks.length })
+    }
 
     /* ── 长期记忆：语义检索的 key / 自检 / 建向量（2.5.0）──
      * ⚠️ key 只在宿主进程里读写，**不回显**（只回 source + 有没有）；
